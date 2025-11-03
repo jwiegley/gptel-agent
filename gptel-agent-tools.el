@@ -765,8 +765,8 @@ Exactly one item should have status \"in_progress\"."
           (plist-put
            info :post              ; Don't use push, see note in gptel-anthropic
            (cons (lambda (&rest _)      ; Clean up header line after tasks are done
-                   (when (and gptel-mode gptel-use-header-line)
-                     (setq header-line-format gptel--header-line-format)))
+                   (when (and gptel-mode gptel-use-header-line header-line-format)
+                     (setf (nth 2 header-line-format) gptel--header-line-info)))
                  (plist-get info :post))))
         (let* ((formatted-todos         ; Format the todo list
                 (mapconcat
@@ -798,14 +798,13 @@ Exactly one item should have status \"in_progress\"."
                  formatted-todos "\n"
                  (propertize "\n" 'face '(:inherit shadow :underline t :extend t)))))
           (overlay-put todo-ov 'after-string todo-display)
-          (when (and gptel-mode gptel-use-header-line in-progress)
-            (setq header-line-format
-                  (nconc (butlast gptel--header-line-format 1)
-                         (list
-                          (propertize " " 'display
-                                      `(space :align-to (- right ,(+ 5 (length in-progress)))))
+          (when (and gptel-mode gptel-use-header-line in-progress header-line-format)
+            (setf (nth 2 header-line-format)
+                  (concat (propertize
+                           " " 'display
+                           `(space :align-to (- right ,(+ 5 (length in-progress)))))
                           (propertize (concat "Task: " in-progress)
-                                      'face 'font-lock-escape-face)))))))))
+                                      'face 'font-lock-escape-face))))))))
   t)
 
 ;;; Task tool (sub-agent)
