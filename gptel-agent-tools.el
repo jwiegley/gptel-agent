@@ -54,6 +54,7 @@
 (eval-when-compile (require 'cl-lib))
 
 (defvar url-http-end-of-headers)
+(defvar gptel-agent--agents)
 
 ;;; System tools
 ;; "Execute Bash commands to inspect files and system state.
@@ -895,7 +896,7 @@ PROMPT is the detailed prompt instructing the agent on what is required."
       (nconc (list :include-reasoning nil
                    :use-tools t
                    :use-context nil)
-             (cdr (assoc agent-type gptel--agents)))
+             (cdr (assoc agent-type gptel-agent--agents)))
     (let* ((info (gptel-fsm-info gptel--fsm-last))
            (where (or (plist-get info :tracking-marker)
                       (plist-get info :position)))
