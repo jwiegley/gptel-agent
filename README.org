@@ -3,9 +3,30 @@
 Agentic use mode for gptel: This is a collection of tools and prompts for
 gptel to enable easy agentic LLM use.
 
-How to use:
+*** Installation
 
-- Set =gptel-model= and =gptel-backend= to use your preferred LLM.
+gptel-agent is not yet on a package archive, you can install it manually or with
+a package manager like Straight/Elpaca.
+
+***** Manual
+
+Clone or download this repository and run =M-x package-install-file⏎= on the
+repository directory.
+
+***** Straight or Elpaca
+
+#+begin_src emacs-lisp
+(straight-use-package (gptel-agent :host github :repo "karthink/gptel-agent"))
+#+end_src
+
+#+begin_src emacs-lisp
+(elpaca (gptel-agent :host github :repo "karthink/gptel-agent"))
+#+end_src
+
+*** How to use:
+
+- Set =gptel-model= and =gptel-backend= to use your preferred LLM.  See [[https://github.com/karthink/gptel][gptel's
+  README]] for details.
 
 - Run M-x =gptel-agent=.  This will open a buffer with the agent preset
   loaded.
@@ -17,24 +38,36 @@ How to use:
   gptel's menu.
 
 - As with gptel, you can use gptel-agent in any buffer.  Just apply the
-  "gptel-agent" preset in the buffer first.
+  "gptel-agent" preset in the buffer first, OR include =@gptel-agent= in the
+  prompt.
+
+Please note: gptel-agent uses significantly more tokens than the average
+gptel LLM interaction.
+
+*** Using sub-agents
 
 gptel-agent can delegate tasks to "sub-agents".  Sub-agents can be specified in
 Markdown or Org files in a directory.  To see how to specify agents, examine the
-"agents" directory in this package.  You can add your directory of agents to
-=gptel-agent-dirs=, which see.
+"agents" directory in this package (or see below).  You can add your directory
+of agents to =gptel-agent-dirs=, which see.
 
 In this demo, gptel-agent delegates a research task to two agents, who perform
 it in parallel and generate reports that gptel-agent uses to answer the question:
 
 https://github.com/user-attachments/assets/03585600-3bb9-4bf7-b5c8-7e02a28c7a37
 
-Right now there are only two sub-agents: =researcher= and =introspector=.  You
-can ask the LLM to delegate a task to them.
+Right now there are three sub-agents:
+- =executor= is a copy of the main LLM, directed to work autonomously and
+  noninteractively, returning a final response.
+- =researcher= is read-only and can search the web or through local files for
+  information.
+- =introspector= can examine the state of Emacs, and access or search
+  documentation from your live Emacs session.  This requires using the [[https://github.com/positron_solutions/ragmacs][ragmacs
+  tools]].
+
+The LLM should automatically delegate tasks to them as required, but you can
+also ask the LLM to: "Use researcher to find out if...".
 
 Highly recommended: Get the [[https://github.com/positron_solutions/ragmacs][ragmacs tools]] if you plan to use gptel-agent for
 anything Emacs related, as the =introspector= agent requires these tools and
 will throw an error otherwise.
-
-Please note: gptel-agent uses significantly more tokens than the average
-gptel LLM interaction.
