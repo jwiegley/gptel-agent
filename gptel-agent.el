@@ -105,6 +105,7 @@ any templates to the system prompt."
       (cl-remf agent-plist :name)
       (cons name agent-plist))))
 
+;;;###autoload
 (defun gptel-agent-update ()
   "Update agent definitions from `gptel-agent-dirs'."
   ;; First pass: discover all agents and collect their file paths

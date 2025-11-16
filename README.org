@@ -22,8 +22,7 @@ https://github.com/user-attachments/assets/03585600-3bb9-4bf7-b5c8-7e02a28c7a37
 
 *** How to install
 
-gptel-agent is not yet on a package archive, you can install it manually or with
-a package manager like Straight/Elpaca.
+gptel-agent is on MELPA, so you can run =M-x package-install= ⏎ =gptel-agent= in Emacs.
 
 #+html: </details>
 #+html: <details><summary>
@@ -49,18 +48,18 @@ Or from =use-package= (Emacs 30+):
 #+html: </summary>
 
 #+begin_src emacs-lisp
-(straight-use-package (gptel-agent :host github :repo "karthink/gptel-agent"))
+(straight-use-package 'gptel-agent)
 #+end_src
 
 #+begin_src emacs-lisp
-(elpaca (gptel-agent :host github :repo "karthink/gptel-agent"))
+(elpaca gptel-agent)
 #+end_src
 
 Or from =use-package=:
 
 #+begin_src emacs-lisp
 (use-package gptel-agent
-  :straight (:host github :repo "karthink/gptel-agent") ;use :ensure for Elpaca
+  :straight t ;use :ensure t for Elpaca
   :config (gptel-agent-update))         ;Read files from agents directories
 #+end_src
 
@@ -86,6 +85,8 @@ There are two ways to use gptel-agent:
   from gptel's menu.
 
 **** Anywhere in Emacs
+
+Place =(gptel-agent-update)= in your config.
 
 As with gptel, you can use gptel-agent in any buffer, including read-only
 buffers and the minibuffer.
