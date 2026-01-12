@@ -352,8 +352,21 @@ Keeps the `gptel-agent-checkpoint-retention' most recent checkpoints."
 (defun gptel-agent-checkpoint (&optional description)
   "Create a checkpoint of current session state.
 
-With prefix arg, prompt for DESCRIPTION.
-Without prefix arg, create checkpoint with auto-generated description."
+Serialize and save the current session state including messages,
+pending tool calls, todo list, and buffer position.  Checkpoints
+enable recovery from crashes or mistakes during long-running
+agent tasks.
+
+With prefix argument, prompt for DESCRIPTION to label the
+checkpoint.  Without prefix, create checkpoint with auto-generated
+description based on current time.
+
+Checkpoints are stored in SQLite alongside sessions and are
+subject to the retention policy in `gptel-agent-checkpoint-retention'.
+Older checkpoints are automatically cleaned up when the limit is
+exceeded.
+
+Signals an error if no active gptel-agent session exists."
   (interactive
    (list (when current-prefix-arg
            (read-string "Checkpoint description: "))))
@@ -381,8 +394,18 @@ Without prefix arg, create checkpoint with auto-generated description."
 (defun gptel-agent-recover ()
   "Check for interrupted sessions and offer recovery.
 
-Prompts user to restore from the most recent checkpoint
-if an interrupted session is detected."
+When an active session has checkpoints, prompt the user to
+restore from the most recent one.  This is useful after crashes
+or when resuming work on a complex task.
+
+The function only activates when both conditions are met:
+- There is a current session (`gptel-agent--current-session-id')
+- Auto-recovery is enabled (`gptel-agent-checkpoint-auto-recover')
+
+If a checkpoint exists, display its timestamp and ask for
+confirmation before restoring.  The restoration process loads
+all serialized state including messages, pending tools, and
+buffer position."
   (interactive)
   (when (and gptel-agent--current-session-id
              gptel-agent-checkpoint-auto-recover)
@@ -395,7 +418,21 @@ if an interrupted session is detected."
 
 ;;;###autoload
 (defun gptel-agent-restore-checkpoint (checkpoint-id)
-  "Restore session state from CHECKPOINT-ID."
+  "Restore session state from CHECKPOINT-ID.
+
+Load the checkpoint identified by CHECKPOINT-ID and restore all
+serialized state to the current buffer.  This includes:
+- Conversation messages
+- Pending tool calls
+- Todo list items
+- Buffer position and tool call counter
+
+When called interactively, prompt with a list of available
+checkpoints for the current session showing timestamps and
+descriptions.
+
+Signals an error if no active session exists or if the checkpoint
+cannot be loaded."
   (interactive
    (let* ((checkpoints (if gptel-agent--current-session-id
                           (gptel-agent--checkpoint-list

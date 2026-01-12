@@ -419,7 +419,25 @@ Triggers alerts based on `gptel-agent-budget-action' setting."
 
 ;;;###autoload
 (defun gptel-agent-stats ()
-  "Display detailed usage statistics."
+  "Display detailed usage statistics.
+
+Show a buffer with comprehensive token usage and cost information
+for both the current session and cumulative (all-time) usage.
+
+Session statistics include:
+- Current model being used
+- Session start time
+- Input and output token counts
+- Estimated cost based on model pricing
+- Number of LLM responses
+
+Cumulative statistics include:
+- Total tokens across all sessions
+- Total estimated cost
+- Total number of sessions and responses
+
+Cost calculations use `gptel-agent-model-pricing' for per-model
+rates in dollars per million tokens."
   (interactive)
   (let* ((session gptel-agent--session-stats)
          (cumulative gptel-agent--cumulative-stats)
