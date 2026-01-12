@@ -1,5 +1,5 @@
 (package "gptel-agent"
-         "0.1.0"
+         "0.2.0"
          "Agent mode extensions for gptel with tool use")
 
 (website-url "https://github.com/jwiegley/dot-emacs/tree/master/lisp/gptel-agent")
@@ -19,11 +19,13 @@
        "gptel-agent-sessions.el"
        "gptel-agent-stats.el"
        "gptel-agent-checkpoints.el"
+       "gptel-agent.texi"
        "CHANGELOG.md")
 
 (script "test" "eask test ert test/*.el")
 (script "lint" "eask lint package")
 (script "compile" "eask compile")
+(script "info" "makeinfo gptel-agent.texi")
 
 (source "gnu")
 (source "melpa")
