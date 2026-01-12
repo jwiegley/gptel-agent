@@ -1,0 +1,974 @@
+\input texinfo    @c -*- texinfo -*-
+@c %**start of header
+@setfilename gptel-agent.info
+@settitle gptel-agent User Manual
+@documentencoding UTF-8
+@documentlanguage en
+@c %**end of header
+
+@copying
+This manual is for gptel-agent version 0.2.0.
+
+Copyright @copyright{} 2025 John Wiegley.
+
+@quotation
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
+@end quotation
+@end copying
+
+@dircategory Emacs misc features
+@direntry
+* gptel-agent: (gptel-agent). Agent mode extensions for gptel with tool use.
+@end direntry
+
+@titlepage
+@title gptel-agent User Manual
+@subtitle Agent mode extensions for gptel
+@author John Wiegley
+@page
+@vskip 0pt plus 1filll
+@insertcopying
+@end titlepage
+
+@contents
+
+@ifnottex
+@node Top
+@top gptel-agent
+
+This manual describes gptel-agent, an agent mode extension for gptel
+that enables autonomous task execution through tool use.
+
+@insertcopying
+@end ifnottex
+
+@menu
+* Introduction::                 Overview of gptel-agent
+* Getting Started::              Installation and basic usage
+* Agent Sessions::               Starting and managing agent sessions
+* Sub-Agents::                   Delegating tasks to specialized agents
+* Tool Permissions::             Controlling tool access
+* Tool Preview::                 Reviewing tools before execution
+* Session Persistence::          Saving and resuming sessions
+* Checkpoints::                  Creating recovery points
+* Token Statistics::             Tracking usage and costs
+* Skills::                       Loading prompt snippets
+* Mode Switching::               Switching between agent modes
+* External Directory Safety::    Project boundary enforcement
+* Context Compaction::           Managing context window size
+* Customization::                Configuration variables
+* Troubleshooting::              Common issues and solutions
+* Function Index::               Index of functions
+* Variable Index::               Index of variables
+@end menu
+
+@node Introduction
+@chapter Introduction
+
+@cindex agent, overview
+@cindex autonomous tasks
+
+gptel-agent is a collection of tools and prompts to use
+@uref{https://github.com/karthink/gptel, gptel} ``agentically'' with any
+LLM, to autonomously perform tasks.
+
+An ``agent'' in this context refers to a bundle of configuration
+consisting of:
+
+@itemize @bullet
+@item
+A system prompt (instructions)
+@item
+Tools (functions the LLM can call)
+@item
+The harness used to run or call the LLM
+@end itemize
+
+gptel uses the term ``preset'' for such configurations.  A preset can
+specify the above and any other behavior, such as the model used, API
+call parameters and so on.
+
+@node Getting Started
+@chapter Getting Started
+
+@menu
+* Installation::                 How to install gptel-agent
+* Quick Start::                  Get up and running quickly
+* Available Tools::              What tools the agent can use
+@end menu
+
+@node Installation
+@section Installation
+
+@cindex installation, package.el
+@cindex installation, use-package
+@cindex installation, straight.el
+
+gptel-agent is available on MELPA.  Install it with:
+
+@example
+M-x package-install RET gptel-agent RET
+@end example
+
+Or with @code{use-package}:
+
+@lisp
+(use-package gptel-agent
+  :ensure t
+  :config (gptel-agent-update))
+@end lisp
+
+For development versions, clone from GitHub:
+
+@lisp
+(use-package gptel-agent
+  :vc ( :url "https://github.com/karthink/gptel-agent"
+        :rev :newest)
+  :config (gptel-agent-update))
+@end lisp
+
+@node Quick Start
+@section Quick Start
+
+@cindex quick start
+@cindex basic usage
+
+@enumerate
+@item
+Install the package (see @ref{Installation})
+@item
+Add to your configuration:
+@lisp
+(require 'gptel-agent)
+(gptel-agent-update)  ; Load agents from agent directories
+@end lisp
+@item
+Run @kbd{M-x gptel-agent} to start an agent session in your current project
+@item
+Start chatting - the agent can read/write files, search the web, and more
+@end enumerate
+
+@node Available Tools
+@section Available Tools
+
+@cindex tools, available
+@cindex capabilities
+
+By default, gptel-agent has access to:
+
+@table @asis
+@item Web Access
+Web search, URL fetching, and YouTube video metadata
+@item Local Files
+Read, write, and edit files in your project
+@item Emacs State
+Documentation and Elisp evaluation
+@item Bash
+Shell commands (POSIX environments only)
+@end table
+
+By default, all actions except for web search, fetching URLs and reading
+local files require confirmation.
+
+@node Agent Sessions
+@chapter Agent Sessions
+
+@menu
+* Starting a Session::           How to start an agent session
+* Using the Agent::              Working with the agent
+* Switching Modes::              Agent vs Plan mode
+@end menu
+
+@node Starting a Session
+@section Starting a Session
+
+@cindex session, starting
+@findex gptel-agent
+
+To start an agent session:
+
+@table @kbd
+@item M-x gptel-agent
+Opens a gptel buffer in the current project with the agent preset loaded.
+Use a prefix argument for more options.
+@end table
+
+@node Using the Agent
+@section Using the Agent
+
+@cindex session, using
+@cindex sending prompts
+
+Use gptel as usual, calling @code{gptel-send} etc.  The agent will
+automatically use tools as needed to accomplish tasks.
+
+If you change the system prompt, tools or other settings in this buffer,
+you can reset the agent configuration by (re)applying the ``gptel-agent''
+preset from gptel's menu.
+
+@node Switching Modes
+@section Switching Modes
+
+@cindex modes, switching
+@cindex plan mode
+@cindex agent mode
+
+You can switch between an agent preset (gptel-agent) and a planning preset
+(gptel-plan) by applying them from gptel's menu, or clicking on the backend
+name in the header line.
+
+The difference between them is in the tools available to the model:
+@itemize @bullet
+@item
+@strong{Agent mode}: Full tool access for executing tasks
+@item
+@strong{Plan mode}: Read-only access for creating systematic plans
+@end itemize
+
+@node Sub-Agents
+@chapter Sub-Agents
+
+@cindex sub-agents
+@cindex delegation
+@cindex agent, specialized
+
+gptel-agent can delegate tasks to ``sub-agents''.  Sub-agents don't share
+context with the main session and return relatively concise reports.
+
+@menu
+* Built-in Sub-Agents::          Default sub-agents included
+* Creating Sub-Agents::          How to define custom sub-agents
+* Why Use Sub-Agents::           Benefits of delegation
+@end menu
+
+@node Built-in Sub-Agents
+@section Built-in Sub-Agents
+
+@cindex executor
+@cindex researcher
+@cindex introspector
+
+gptel-agent includes three sub-agents:
+
+@table @code
+@item executor
+A copy of the main LLM, directed to work autonomously and
+noninteractively, returning a final response.
+@item researcher
+Read-only agent that can search the web or through local files for
+information.
+@item introspector
+Can examine the state of Emacs, and access or search documentation from
+your live Emacs session.
+@end table
+
+@node Creating Sub-Agents
+@section Creating Sub-Agents
+
+@cindex agent, creating
+@cindex markdown agent
+@cindex org agent
+
+Sub-agents can be specified in Markdown or Org files in a directory.
+Add your directory of agents to @code{gptel-agent-dirs}.
+
+@subheading Markdown Format
+
+@example
+----
+name: arxiv-explorer
+description: Searches ArXiv and parses results
+tools: [mcp-arxiv, WebSearch]
+pre: (lambda () (gptel-mcp-connect '(arxiv) 'sync))
+----
+
+You are a specialized research agent...
+@end example
+
+@subheading Org Format
+
+@example
+:properties:
+:name: arxiv-explorer
+:description: Searches ArXiv and parses results
+:tools: mcp-arxiv WebSearch
+:pre: (lambda () (gptel-mcp-connect '(arxiv) 'sync))
+:end:
+
+You are a specialized research agent...
+@end example
+
+@node Why Use Sub-Agents
+@section Why Use Sub-Agents
+
+@cindex context window
+@cindex delegation benefits
+
+LLMs often run into dead-ends when trying things, which can bloat and
+pollute the context window.  Sub-agents:
+
+@itemize @bullet
+@item
+Don't share context with the main session
+@item
+Return concise reports that gptel-agent can refer to
+@item
+Can be provided with tools specific to their task
+@item
+Can be restricted (e.g., read-only access)
+@item
+Can use specific models or API parameters independent of gptel-agent
+@end itemize
+
+@node Tool Permissions
+@chapter Tool Permissions
+
+@cindex permissions
+@cindex tool control
+@cindex .gptel-agent.el
+
+gptel-agent supports project-level tool permission configuration via
+@file{.gptel-agent.el} files in your project root.
+
+@menu
+* Permission Patterns::          Allow, deny, and ask patterns
+* Configuration File::           The .gptel-agent.el file
+@end menu
+
+@node Permission Patterns
+@section Permission Patterns
+
+@cindex allow patterns
+@cindex deny patterns
+@cindex ask patterns
+
+Three permission levels are available:
+
+@table @code
+@item allow
+Tools matching these patterns execute without confirmation
+@item deny
+Tools matching these patterns are never allowed
+@item ask
+Tools matching these patterns require user approval
+@end table
+
+Patterns support glob-style matching (e.g., @code{Read*}, @code{*Write*}).
+
+@node Configuration File
+@section Configuration File
+
+@vindex gptel-agent-permission-file
+
+Create @file{.gptel-agent.el} in your project root:
+
+@lisp
+(:tool-permissions
+ (:allow ("Read" "Grep" "Glob")      ; Always allow these
+  :deny ("Bash")                      ; Never allow
+  :ask ("Write" "Edit")))             ; Prompt for approval
+@end lisp
+
+@node Tool Preview
+@chapter Tool Preview
+
+@cindex tool preview
+@cindex transient menu
+@cindex approval
+
+gptel-agent can preview tool calls in a transient menu before execution,
+showing exactly what the agent wants to do.
+
+@menu
+* Enabling Preview::             How to enable tool preview
+* Preview Interface::            Using the preview menu
+@end menu
+
+@node Enabling Preview
+@section Enabling Preview
+
+@findex gptel-agent-tool-preview-mode
+@kindex C-c C-a t
+
+Toggle tool preview mode with:
+
+@table @kbd
+@item C-c C-a t
+Toggle @code{gptel-agent-tool-preview-mode}
+@item M-x gptel-agent-tool-preview-mode
+Enable interactively
+@end table
+
+Or add to your configuration:
+
+@lisp
+(gptel-agent-tool-preview-mode 1)
+@end lisp
+
+@node Preview Interface
+@section Preview Interface
+
+@cindex preview menu
+@cindex diff preview
+
+The preview transient shows:
+@itemize @bullet
+@item
+The tool name and arguments
+@item
+For file modifications, a diff-style preview
+@item
+Options to approve, deny, or modify the call
+@end itemize
+
+@node Session Persistence
+@chapter Session Persistence
+
+@cindex session persistence
+@cindex SQLite storage
+@cindex session save
+
+Sessions are automatically saved to SQLite for later resumption.
+
+@menu
+* Session Commands::             Commands for session management
+* Auto-Save::                    Automatic session saving
+* Storage Backend::              SQLite and JSON fallback
+@end menu
+
+@node Session Commands
+@section Session Commands
+
+@findex gptel-agent-resume
+@findex gptel-agent-sessions
+
+@table @kbd
+@item M-x gptel-agent-resume
+Resume a previous session
+@item M-x gptel-agent-sessions
+Browse all sessions in an interactive list
+@end table
+
+@node Auto-Save
+@section Auto-Save
+
+@vindex gptel-agent-session-auto-save
+@cindex idle timer
+
+Sessions auto-save after idle time (configurable).  This uses WAL mode
+for crash resistance.
+
+@lisp
+(setq gptel-agent-session-auto-save t)
+(setq gptel-agent-session-idle-delay 30)  ; seconds
+@end lisp
+
+@node Storage Backend
+@section Storage Backend
+
+@cindex SQLite
+@cindex JSON fallback
+
+gptel-agent uses Emacs 29+ built-in SQLite when available.  If SQLite
+is not available, it falls back to JSON file storage.
+
+Check availability with @code{(sqlite-available-p)}.
+
+@node Checkpoints
+@chapter Checkpoints
+
+@cindex checkpoints
+@cindex recovery
+@cindex long-running tasks
+
+Create checkpoints during long-running tasks for recovery.
+
+@menu
+* Checkpoint Commands::          Manual checkpoint creation
+* Automatic Checkpoints::        Triggered by tool calls
+* Recovery::                     Restoring from checkpoints
+@end menu
+
+@node Checkpoint Commands
+@section Checkpoint Commands
+
+@findex gptel-agent-checkpoint
+@findex gptel-agent-recover
+@findex gptel-agent-list-checkpoints
+
+@table @kbd
+@item M-x gptel-agent-checkpoint
+Create a manual checkpoint with optional description
+@item M-x gptel-agent-recover
+Recover from the last checkpoint
+@item M-x gptel-agent-list-checkpoints
+Browse all checkpoints for current session
+@end table
+
+@node Automatic Checkpoints
+@section Automatic Checkpoints
+
+@vindex gptel-agent-checkpoint-frequency
+@cindex tool call counter
+
+Automatic checkpoints are created every N tool calls:
+
+@lisp
+(setq gptel-agent-checkpoint-frequency 5)  ; Every 5 tool calls
+@end lisp
+
+Set to @code{nil} to disable automatic checkpoints.
+
+@node Recovery
+@section Recovery
+
+@vindex gptel-agent-checkpoint-auto-recover
+@cindex interrupted sessions
+
+When an interrupted session is detected, gptel-agent can prompt to
+recover from the last checkpoint:
+
+@lisp
+(setq gptel-agent-checkpoint-auto-recover t)
+@end lisp
+
+@node Token Statistics
+@chapter Token Statistics
+
+@cindex token tracking
+@cindex cost calculation
+@cindex usage statistics
+
+Track token usage and costs in real-time.
+
+@menu
+* Statistics Commands::          Viewing statistics
+* Budget Limits::                Setting spending limits
+* Data Export::                  Exporting usage data
+@end menu
+
+@node Statistics Commands
+@section Statistics Commands
+
+@findex gptel-agent-stats
+@findex gptel-agent-stats-reset
+
+@table @kbd
+@item M-x gptel-agent-stats
+View detailed statistics for current session
+@item M-x gptel-agent-stats-reset
+Reset statistics for current session
+@end table
+
+The header line shows compact usage information including input/output
+tokens and cost.
+
+@node Budget Limits
+@section Budget Limits
+
+@vindex gptel-agent-budget-limit
+@vindex gptel-agent-budget-action
+@cindex spending limits
+
+Set budget limits with configurable actions:
+
+@lisp
+(setq gptel-agent-budget-limit 10.0)      ; $10 budget
+(setq gptel-agent-budget-action 'confirm) ; Require confirmation
+@end lisp
+
+Budget actions: @code{warn}, @code{confirm}, or @code{stop}.
+
+@node Data Export
+@section Data Export
+
+@findex gptel-agent-export-stats
+@cindex CSV export
+@cindex JSON export
+
+Export usage data to CSV or JSON:
+
+@table @kbd
+@item M-x gptel-agent-export-stats
+Export statistics to file (prompts for format)
+@end table
+
+@node Skills
+@chapter Skills
+
+@cindex skills
+@cindex prompt snippets
+@cindex SKILL.md
+
+Load prompt snippets from @file{SKILL.md} or @file{SKILL.org} files.
+
+@menu
+* Loading Skills::               How to load a skill
+* Skill Format::                 Defining skill files
+@end menu
+
+@node Loading Skills
+@section Loading Skills
+
+@findex gptel-agent-load-skill
+
+@table @kbd
+@item M-x gptel-agent-load-skill
+Load a skill into current session
+@end table
+
+Skills can:
+@itemize @bullet
+@item
+Add to tool permissions
+@item
+Prepend or append prompts
+@item
+Define dependencies on other skills
+@end itemize
+
+@node Skill Format
+@section Skill Format
+
+Skills are defined in @file{SKILL.md} or @file{SKILL.org} files with YAML
+or Org properties:
+
+@example
+----
+name: code-review
+description: Expert code reviewer
+tools: [Read, Grep, Glob]
+position: prepend
+depends: [researcher]
+----
+
+Review code for quality, security, and performance issues...
+@end example
+
+@node Mode Switching
+@chapter Mode Switching
+
+@cindex mode switching
+@cindex custom modes
+
+Enhanced mode cycling for different workflows.
+
+@menu
+* Mode Commands::                Switching between modes
+* Custom Modes::                 Defining your own modes
+@end menu
+
+@node Mode Commands
+@section Mode Commands
+
+@kindex C-c C-a m
+@findex gptel-agent-cycle-mode
+
+@table @kbd
+@item C-c C-a m
+Cycle between available modes
+@end table
+
+Default modes:
+@table @code
+@item agent
+Full tool access for executing tasks
+@item plan
+Read-only tools for planning and analysis
+@end table
+
+@node Custom Modes
+@section Custom Modes
+
+@vindex gptel-agent-custom-modes
+
+Define custom modes:
+
+@lisp
+(setq gptel-agent-custom-modes
+      '((review . (:tools (Read Grep Glob)
+                   :prompt "You are a code reviewer..."
+                   :face gptel-agent-review-face))
+        (debug . (:tools (Read Bash Evaluate)
+                  :prompt "You are debugging..."))))
+@end lisp
+
+@node External Directory Safety
+@chapter External Directory Safety
+
+@cindex project boundaries
+@cindex external paths
+@cindex safety controls
+
+gptel-agent enforces project boundaries to prevent accidental
+modifications outside your project.
+
+@menu
+* Boundary Detection::           How boundaries are determined
+* External Access Policy::       Configuring access outside project
+* Whitelisted Paths::            Trusted external paths
+@end menu
+
+@node Boundary Detection
+@section Boundary Detection
+
+@cindex project root
+@cindex project detection
+
+The project boundary is determined by:
+@enumerate
+@item
+@code{project-root} if in a project
+@item
+@code{default-directory} otherwise
+@end enumerate
+
+@node External Access Policy
+@section External Access Policy
+
+@vindex gptel-agent-external-access-policy
+
+Configure how external paths are handled:
+
+@lisp
+(setq gptel-agent-external-access-policy 'ask)
+@end lisp
+
+Policy values:
+@table @code
+@item deny
+Never allow external access
+@item ask
+Prompt for each external path
+@item allow
+Allow all external access (not recommended)
+@end table
+
+@node Whitelisted Paths
+@section Whitelisted Paths
+
+@vindex gptel-agent-external-whitelist
+
+Whitelist trusted external paths:
+
+@lisp
+(setq gptel-agent-external-whitelist
+      '("~/common-libs/"
+        "/usr/local/share/docs/"))
+@end lisp
+
+@node Context Compaction
+@chapter Context Compaction
+
+@cindex context compaction
+@cindex context overflow
+@cindex summarization
+
+Automatic prompt compaction prevents context window overflow.
+
+@menu
+* Compaction Strategies::        Available compaction methods
+* Compaction Settings::          Configuration options
+@end menu
+
+@node Compaction Strategies
+@section Compaction Strategies
+
+@vindex gptel-agent-compaction-strategy
+
+Available strategies:
+
+@table @code
+@item summarize
+Use the LLM to summarize older messages (preserves meaning)
+@item truncate
+Remove oldest messages (fast, but loses information)
+@item hybrid
+Summarize then truncate if needed
+@end table
+
+@node Compaction Settings
+@section Compaction Settings
+
+@vindex gptel-agent-compaction-threshold
+@vindex gptel-agent-compaction-preserved-count
+
+@lisp
+;; Trigger compaction at this token count
+(setq gptel-agent-compaction-threshold 100000)
+
+;; Always preserve this many recent messages
+(setq gptel-agent-compaction-preserved-count 10)
+@end lisp
+
+@node Customization
+@chapter Customization
+
+@cindex customization
+@cindex configuration
+
+Key configuration variables:
+
+@menu
+* General Settings::             Core settings
+* Session Settings::             Session persistence options
+* Checkpoint Settings::          Checkpoint configuration
+* Statistics Settings::          Token tracking options
+@end menu
+
+@node General Settings
+@section General Settings
+
+@vtable @code
+@item gptel-agent-dirs
+List of directories containing sub-agent definitions.
+
+@item gptel-agent-require-approval
+List of tool patterns that require user approval.
+
+@item gptel-agent-auto-approve
+List of tool patterns that execute without approval.
+@end vtable
+
+@node Session Settings
+@section Session Settings
+
+@vtable @code
+@item gptel-agent-session-auto-save
+Whether to auto-save sessions (default: @code{t}).
+
+@item gptel-agent-session-idle-delay
+Seconds before auto-save triggers (default: 30).
+
+@item gptel-agent-session-db-file
+Path to SQLite database file.
+
+@item gptel-agent-session-retention-days
+Days to keep old sessions (default: 30).
+@end vtable
+
+@node Checkpoint Settings
+@section Checkpoint Settings
+
+@vtable @code
+@item gptel-agent-checkpoint-frequency
+Number of tool calls between automatic checkpoints (default: 5).
+Set to @code{nil} to disable.
+
+@item gptel-agent-checkpoint-retention
+Maximum checkpoints to keep per session (default: 10).
+
+@item gptel-agent-checkpoint-auto-recover
+Whether to prompt for recovery on interrupted sessions (default: @code{t}).
+@end vtable
+
+@node Statistics Settings
+@section Statistics Settings
+
+@vtable @code
+@item gptel-agent-model-pricing
+Alist of model names to pricing (input/output per million tokens).
+
+@item gptel-agent-budget-limit
+Maximum spending limit in dollars (@code{nil} for no limit).
+
+@item gptel-agent-budget-action
+Action when budget exceeded: @code{warn}, @code{confirm}, or @code{stop}.
+
+@item gptel-agent-stats-header-line
+Whether to show stats in header line (default: @code{t}).
+@end vtable
+
+@node Troubleshooting
+@chapter Troubleshooting
+
+@cindex troubleshooting
+@cindex common issues
+
+@menu
+* Agent Not Loading::            Agent fails to start
+* Tool Calls Failing::           Tools return errors
+* Sub-Agent Not Found::          Custom agents not working
+* Session Not Saving::           Persistence issues
+* Preview Not Showing::          Tool preview issues
+@end menu
+
+@node Agent Not Loading
+@section Agent Not Loading
+
+@cindex loading errors
+
+Ensure @code{gptel-agent-update} is called in your config to load agents
+from directories.
+
+Check that gptel is up to date (not just latest stable).
+
+@node Tool Calls Failing
+@section Tool Calls Failing
+
+@cindex tool errors
+
+@enumerate
+@item
+Check @file{*gptel-log*} buffer for detailed error messages
+@item
+Verify the tool is registered: @kbd{M-x gptel-describe-tools}
+@item
+For file operations, check file permissions
+@end enumerate
+
+@node Sub-Agent Not Found
+@section Sub-Agent Not Found
+
+@cindex agent not found
+
+@enumerate
+@item
+Verify agent file exists in one of @code{gptel-agent-dirs}
+@item
+Check that the file has valid frontmatter (description is required)
+@item
+Run @kbd{M-x gptel-agent-update} to reload agents
+@end enumerate
+
+@node Session Not Saving
+@section Session Not Saving
+
+@cindex persistence errors
+@cindex SQLite errors
+
+@enumerate
+@item
+Verify SQLite is available: @code{(sqlite-available-p)}
+@item
+Check @code{gptel-agent-session-db-file} is writable
+@item
+Falls back to JSON if SQLite unavailable
+@end enumerate
+
+@node Preview Not Showing
+@section Preview Not Showing
+
+@cindex preview errors
+
+@enumerate
+@item
+Enable with @kbd{M-x gptel-agent-tool-preview-mode}
+@item
+Or add to config: @code{(gptel-agent-tool-preview-mode 1)}
+@end enumerate
+
+@node Function Index
+@appendix Function Index
+
+@printindex fn
+
+@node Variable Index
+@appendix Variable Index
+
+@printindex vr
+
+@bye
