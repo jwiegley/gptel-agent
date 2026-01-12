@@ -16,7 +16,8 @@
        "gptel-agent-transient.el"
        "gptel-agent-skills.el"
        "gptel-agent-modes.el"
-       "gptel-agent-sessions.el")
+       "gptel-agent-sessions.el"
+       "gptel-agent-stats.el")
 
 (script "test" "eask test ert test/*.el")
 (script "lint" "eask lint package")
