@@ -3,6 +3,17 @@
 This is a collection of tools and prompts to use [[https://github.com/karthink/gptel][gptel]] "agentically" with any
 LLM, to autonomously perform tasks.
 
+*** Quick Start
+
+1. Install the package (see installation below)
+2. Add to your config:
+   #+begin_src emacs-lisp
+   (require 'gptel-agent)
+   (gptel-agent-update)  ; Load agents from agent directories
+   #+end_src
+3. Run =M-x gptel-agent= to start an agent session in your current project
+4. Start chatting - the agent can read/write files, search the web, and more
+
 It has access to
 - the web (via basic web search, URL fetching and YouTube video metadata),
 - local files (read/write/edit),
@@ -232,3 +243,115 @@ agent is called.  I am assuming a tool category named "mcp-arxiv" is provided by
 the "arxiv" MCP server.
 
 #+html: </details>
+
+*** Enhanced Features
+
+This version of gptel-agent includes several enhancement modules:
+
+**** Tool Permissions (gptel-agent-permissions.el)
+
+Configure per-project tool permissions in =.gptel-agent.el=:
+
+#+begin_src emacs-lisp
+;; .gptel-agent.el in your project root
+(:tool-permissions
+ (:allow ("Read" "Grep" "Glob")      ; Always allow these
+  :deny ("Bash")                      ; Never allow
+  :ask ("Write" "Edit")))             ; Prompt for approval
+#+end_src
+
+**** Tool Preview (gptel-agent-transient.el)
+
+Tool calls are previewed in a transient menu before execution, showing exactly
+what the agent wants to do. Use =C-c C-a t= to toggle preview mode.
+
+**** Session Persistence (gptel-agent-sessions.el)
+
+Sessions are automatically saved to SQLite for later resumption:
+
+- =M-x gptel-agent-resume= - Resume a previous session
+- =M-x gptel-agent-sessions= - Browse all sessions
+
+**** Checkpoints (gptel-agent-checkpoints.el)
+
+Create checkpoints during long-running tasks for recovery:
+
+- =M-x gptel-agent-checkpoint= - Create manual checkpoint
+- =M-x gptel-agent-recover= - Recover from last checkpoint
+- Automatic checkpoints every N tool calls (configurable)
+
+**** Token Statistics (gptel-agent-stats.el)
+
+Track token usage and costs:
+
+- =M-x gptel-agent-stats= - View detailed statistics
+- =M-x gptel-agent-export-stats= - Export to CSV/JSON
+- Budget limits with configurable alerts
+
+**** Skills (gptel-agent-skills.el)
+
+Load prompt snippets from =SKILL.md= or =SKILL.org= files:
+
+- =M-x gptel-agent-load-skill= - Load a skill into current session
+- Skills can add tool permissions, prepend/append prompts
+
+**** Mode Switching (gptel-agent-modes.el)
+
+Enhanced mode switching with =C-c C-a m=:
+
+- Agent mode: Full tool access
+- Plan mode: Read-only tools for planning
+- Custom modes via =gptel-agent-custom-modes=
+
+*** Configuration
+
+**** Directory Configuration
+
+#+begin_src emacs-lisp
+;; Add custom agent directories
+(add-to-list 'gptel-agent-dirs "~/my-agents/")
+#+end_src
+
+**** Token Budget
+
+#+begin_src emacs-lisp
+(setq gptel-agent-budget-limit 10.0)     ; $10 budget
+(setq gptel-agent-budget-action 'confirm) ; Require confirmation
+#+end_src
+
+**** Checkpoint Frequency
+
+#+begin_src emacs-lisp
+(setq gptel-agent-checkpoint-frequency 5) ; Every 5 tool calls
+(setq gptel-agent-checkpoint-retention 10) ; Keep 10 checkpoints
+#+end_src
+
+*** Troubleshooting
+
+**** Agent not loading
+
+Ensure =gptel-agent-update= is called in your config to load agents from
+directories.
+
+**** Tool calls failing
+
+1. Check =*gptel-log*= buffer for detailed error messages
+2. Verify the tool is registered: =M-x gptel-describe-tools=
+3. For file operations, check file permissions
+
+**** Sub-agent not found
+
+1. Verify agent file exists in one of =gptel-agent-dirs=
+2. Check that the file has valid frontmatter (description is required)
+3. Run =M-x gptel-agent-update= to reload agents
+
+**** Session not saving
+
+1. Verify SQLite is available: =(sqlite-available-p)=
+2. Check =gptel-agent-session-db-file= is writable
+3. Falls back to JSON if SQLite unavailable
+
+**** Preview not showing
+
+1. Enable with =M-x gptel-agent-tool-preview-mode=
+2. Or add to config: =(gptel-agent-tool-preview-mode 1)=
