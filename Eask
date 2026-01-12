@@ -18,7 +18,8 @@
        "gptel-agent-modes.el"
        "gptel-agent-sessions.el"
        "gptel-agent-stats.el"
-       "gptel-agent-checkpoints.el")
+       "gptel-agent-checkpoints.el"
+       "CHANGELOG.md")
 
 (script "test" "eask test ert test/*.el")
 (script "lint" "eask lint package")
