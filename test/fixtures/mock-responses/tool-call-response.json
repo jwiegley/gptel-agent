@@ -1,0 +1,13 @@
+{
+  "type": "tool_use",
+  "tool_calls": [
+    {
+      "id": "call_123",
+      "name": "Read",
+      "arguments": {
+        "file_path": "/path/to/file.el"
+      }
+    }
+  ],
+  "stop_reason": "tool_use"
+}

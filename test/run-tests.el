@@ -18,6 +18,10 @@
 ;; Load dependencies
 (require 'ert)
 
+;; Load shared test utilities
+(load-file (expand-file-name "test-helper.el"
+                             (file-name-directory load-file-name)))
+
 ;; Load test files
 (load-file (expand-file-name "gptel-agent-permissions-test.el"
                              (file-name-directory load-file-name)))
