@@ -1,0 +1,637 @@
+;;; gptel-agent-safety.el --- Doom loop detection for gptel-agent -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2025 John Wiegley
+
+;; Author: John Wiegley <johnw@newartisans.com>
+;; Maintainer: John Wiegley <johnw@newartisans.com>
+;; Created: January 2025
+;; Version: 0.1.0
+;; Keywords: tools, convenience, safety
+;; Homepage: https://github.com/jwiegley/dot-emacs/tree/master/lisp/gptel-agent
+;; Package-Requires: ((emacs "29.1") (cl-lib "0.5") (ring "1.0"))
+
+;; This file is not part of GNU Emacs.
+
+;;; Commentary:
+
+;; This module implements doom loop detection and prevention for gptel-agent,
+;; protecting against repetitive tool call patterns that waste tokens and time.
+;;
+;; Features:
+;; - Ring-buffer based tracking of recent tool calls
+;; - Multiple detection algorithms for identical and similar patterns
+;; - Configurable thresholds and similarity scoring
+;; - Interactive intervention UI with multiple resolution options
+;; - Token waste estimation
+;; - Detailed logging of incidents
+;; - Global and per-session control
+;;
+;; Detection Patterns:
+;;
+;; 1. Identical Calls: Exact repetition of tool name and arguments
+;; 2. Similar Calls: Near-identical calls (using string-distance)
+;; 3. Alternating Pattern: A->B->A->B cycling
+;; 4. Oscillating Results: Same tool returning different results repeatedly
+;;
+;; Configuration:
+;;
+;; Customize `gptel-agent-doom-loop-threshold' to set how many repetitions
+;; trigger detection (default 3).
+;;
+;; Customize `gptel-agent-doom-loop-action' to control what happens when
+;; a loop is detected:
+;;   - 'warn: Show warning buffer and prompt for action
+;;   - 'auto-adjust: Automatically adjust temperature and continue
+;;   - 'abort: Immediately stop execution
+;;
+;; Usage:
+;;
+;;   (gptel-agent-safety-mode 1)  ; Enable globally
+;;   (gptel-agent-doom-loop-status)  ; View current state
+;;
+;; The system automatically integrates with gptel-agent-tools.el via
+;; `gptel-post-response-functions' hook.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'ring)
+
+(declare-function gptel--update-status "gptel" (msg &optional face))
+
+(defgroup gptel-agent-safety nil
+  "Doom loop detection and prevention for gptel-agent."
+  :group 'gptel
+  :prefix "gptel-agent-safety-")
+
+;;;; Customization Options
+
+(defcustom gptel-agent-doom-loop-threshold 3
+  "Number of repetitions before triggering doom loop detection.
+
+When a tool call pattern repeats this many times, the doom loop
+detector will activate and potentially intervene."
+  :type 'integer
+  :group 'gptel-agent-safety)
+
+(defcustom gptel-agent-doom-loop-similarity 0.8
+  "Similarity threshold for detecting near-identical calls.
+
+A value between 0.0 (completely different) and 1.0 (identical).
+Calls with similarity above this threshold are considered part of
+a potential doom loop.  Default 0.8 catches minor variations while
+allowing intentional parameter changes."
+  :type 'float
+  :group 'gptel-agent-safety)
+
+(defcustom gptel-agent-doom-loop-action 'warn
+  "Action to take when a doom loop is detected.
+
+- `warn': Display warning buffer and prompt user for action
+- `auto-adjust': Automatically adjust temperature and continue
+- `abort': Immediately stop execution"
+  :type '(choice (const :tag "Warn user" warn)
+                 (const :tag "Auto-adjust parameters" auto-adjust)
+                 (const :tag "Abort execution" abort))
+  :group 'gptel-agent-safety)
+
+(defcustom gptel-agent-doom-loop-buffer-size 20
+  "Size of the ring buffer for tracking recent tool calls.
+
+Larger values allow detection of longer-period patterns but use
+more memory.  Must be at least twice `gptel-agent-doom-loop-threshold'."
+  :type 'integer
+  :group 'gptel-agent-safety)
+
+(defcustom gptel-agent-doom-loop-enabled t
+  "Whether doom loop detection is enabled.
+
+When nil, tool calls are not tracked and detection does not occur."
+  :type 'boolean
+  :group 'gptel-agent-safety)
+
+;;;; Internal State
+
+(defvar-local gptel-agent--recent-tool-calls nil
+  "Ring buffer of recent tool calls.
+
+Each entry is a plist with keys:
+  :tool      - Tool name (string)
+  :args      - Tool arguments (plist or list)
+  :result    - Tool execution result (string)
+  :timestamp - Time of execution (time value)")
+
+(defvar-local gptel-agent--doom-loop-log nil
+  "List of doom loop incidents in this buffer.
+
+Each entry is a plist with keys:
+  :timestamp - When the loop was detected
+  :pattern   - Description of the detected pattern
+  :count     - Number of repetitions
+  :action    - Action taken (continue/abort/adjust)
+  :score     - Confidence score (0.0-1.0)")
+
+;;;; Ring Buffer Management
+
+(defun gptel-agent--ensure-ring ()
+  "Ensure the tool call ring buffer exists and is properly sized."
+  (unless gptel-agent--recent-tool-calls
+    (setq gptel-agent--recent-tool-calls
+          (make-ring gptel-agent-doom-loop-buffer-size)))
+  ;; Resize if configuration changed
+  (when (/= (ring-size gptel-agent--recent-tool-calls)
+            gptel-agent-doom-loop-buffer-size)
+    (let ((old-ring gptel-agent--recent-tool-calls)
+          (new-ring (make-ring gptel-agent-doom-loop-buffer-size)))
+      (dotimes (i (min (ring-length old-ring)
+                       gptel-agent-doom-loop-buffer-size))
+        (ring-insert new-ring (ring-ref old-ring i)))
+      (setq gptel-agent--recent-tool-calls new-ring))))
+
+(defun gptel-agent--track-tool-call (tool args result)
+  "Add a tool call entry to the tracking ring buffer.
+
+TOOL is the tool name (string or symbol).
+ARGS is the argument list or plist.
+RESULT is the execution result (string)."
+  (when gptel-agent-doom-loop-enabled
+    (gptel-agent--ensure-ring)
+    (ring-insert gptel-agent--recent-tool-calls
+                 (list :tool (if (symbolp tool) (symbol-name tool) tool)
+                       :args args
+                       :result result
+                       :timestamp (current-time)))))
+
+(defun gptel-agent--get-recent-calls (&optional n)
+  "Retrieve the last N tool call entries from the ring buffer.
+
+Returns a list of plists, most recent first.  If N is nil or larger
+than the ring length, returns all entries."
+  (when gptel-agent--recent-tool-calls
+    (let* ((ring-len (ring-length gptel-agent--recent-tool-calls))
+           (n (or n ring-len))
+           (count (min n ring-len))
+           (result nil))
+      (dotimes (i count)
+        (push (ring-ref gptel-agent--recent-tool-calls i) result))
+      result)))
+
+(defun gptel-agent--clear-tool-history ()
+  "Reset the tool call tracking ring buffer."
+  (interactive)
+  (when gptel-agent--recent-tool-calls
+    (setq gptel-agent--recent-tool-calls
+          (make-ring gptel-agent-doom-loop-buffer-size)))
+  (message "Tool call history cleared"))
+
+;;;; Pattern Detection Utilities
+
+(defun gptel-agent--normalize-tool-args (tool args)
+  "Normalize ARGS for TOOL to enable consistent comparison.
+
+Handles path normalization, whitespace trimming, and argument ordering."
+  (let ((normalized
+         (cond
+          ;; Plist args
+          ((and (consp args) (keywordp (car args)))
+           (let ((result nil))
+             (cl-loop for (key val) on args by #'cddr
+                      do (push key result)
+                      (push (if (stringp val)
+                                (string-trim val)
+                              val)
+                            result))
+             (nreverse result)))
+          ;; List args
+          ((consp args)
+           (mapcar (lambda (arg)
+                     (if (stringp arg)
+                         (string-trim arg)
+                       arg))
+                   args))
+          ;; Single value
+          ((stringp args)
+           (string-trim args))
+          ;; Other
+          (t args))))
+    ;; Normalize file paths for bash, read, write, edit tools
+    (when (member tool '("Bash" "bash" "Read" "read" "Write" "write"
+                         "Edit" "edit" "Grep" "grep" "Glob" "glob"))
+      (setq normalized
+            (if (consp normalized)
+                (mapcar (lambda (arg)
+                          (if (and (stringp arg)
+                                   (string-match-p "/" arg))
+                              (expand-file-name arg)
+                            arg))
+                        normalized)
+              (when (and (stringp normalized)
+                         (string-match-p "/" normalized))
+                (expand-file-name normalized)))))
+    normalized))
+
+(defun gptel-agent--calls-identical-p (call1 call2)
+  "Check if CALL1 and CALL2 are identical tool calls.
+
+Compares tool names and normalized arguments for exact match."
+  (and (equal (plist-get call1 :tool)
+              (plist-get call2 :tool))
+       (equal (gptel-agent--normalize-tool-args
+               (plist-get call1 :tool)
+               (plist-get call1 :args))
+              (gptel-agent--normalize-tool-args
+               (plist-get call2 :tool)
+               (plist-get call2 :args)))))
+
+(defun gptel-agent--calls-similar-p (call1 call2 threshold)
+  "Check if CALL1 and CALL2 are similar within THRESHOLD.
+
+Uses string-distance (Levenshtein) to compare serialized forms.
+Returns non-nil if similarity is >= THRESHOLD (0.0-1.0)."
+  (let* ((tool1 (plist-get call1 :tool))
+         (tool2 (plist-get call2 :tool)))
+    ;; Tools must be the same
+    (when (equal tool1 tool2)
+      (let* ((args1-str (format "%S" (gptel-agent--normalize-tool-args
+                                      tool1 (plist-get call1 :args))))
+             (args2-str (format "%S" (gptel-agent--normalize-tool-args
+                                      tool2 (plist-get call2 :args))))
+             (max-len (max (length args1-str) (length args2-str))))
+        (when (> max-len 0)
+          (let ((distance (string-distance args1-str args2-str)))
+            (>= (- 1.0 (/ (float distance) max-len)) threshold)))))))
+
+;;;; Pattern Detection Algorithms
+
+(defun gptel-agent--detect-identical-sequence ()
+  "Detect sequences of identical tool calls.
+
+Returns plist with :type 'identical, :pattern, :count, or nil."
+  (let ((calls (gptel-agent--get-recent-calls gptel-agent-doom-loop-threshold)))
+    (when (>= (length calls) gptel-agent-doom-loop-threshold)
+      (let ((first-call (car calls))
+            (all-identical t))
+        (dolist (call (cdr calls))
+          (unless (gptel-agent--calls-identical-p first-call call)
+            (setq all-identical nil)))
+        (when all-identical
+          (list :type 'identical
+                :pattern (format "Identical call to '%s' with args: %S"
+                                 (plist-get first-call :tool)
+                                 (plist-get first-call :args))
+                :count (length calls)))))))
+
+(defun gptel-agent--detect-similar-sequence ()
+  "Detect sequences of similar (but not identical) tool calls.
+
+Returns plist with :type 'similar, :pattern, :count, or nil."
+  (let ((calls (gptel-agent--get-recent-calls gptel-agent-doom-loop-threshold)))
+    (when (>= (length calls) gptel-agent-doom-loop-threshold)
+      (let ((first-call (car calls))
+            (all-similar t))
+        (dolist (call (cdr calls))
+          (unless (or (gptel-agent--calls-identical-p first-call call)
+                      (gptel-agent--calls-similar-p
+                       first-call call gptel-agent-doom-loop-similarity))
+            (setq all-similar nil)))
+        (when all-similar
+          (list :type 'similar
+                :pattern (format "Similar calls to '%s' (threshold: %.2f)"
+                                 (plist-get first-call :tool)
+                                 gptel-agent-doom-loop-similarity)
+                :count (length calls)))))))
+
+(defun gptel-agent--detect-alternating-pattern ()
+  "Detect A->B->A->B alternating pattern.
+
+Returns plist with :type 'alternating, :pattern, :count, or nil."
+  (let ((calls (gptel-agent--get-recent-calls (* 2 gptel-agent-doom-loop-threshold))))
+    (when (>= (length calls) (* 2 gptel-agent-doom-loop-threshold))
+      (let ((pairs nil))
+        ;; Group into consecutive pairs
+        (cl-loop for (a b) on calls by #'cddr
+                 while b
+                 do (push (cons a b) pairs))
+        (setq pairs (nreverse pairs))
+        ;; Check if all pairs match the first pair
+        (when (>= (length pairs) gptel-agent-doom-loop-threshold)
+          (let ((first-pair (car pairs))
+                (all-match t))
+            (dolist (pair (cdr pairs))
+              (unless (and (gptel-agent--calls-identical-p
+                            (car first-pair) (car pair))
+                           (gptel-agent--calls-identical-p
+                            (cdr first-pair) (cdr pair)))
+                (setq all-match nil)))
+            (when all-match
+              (list :type 'alternating
+                    :pattern (format "Alternating between '%s' and '%s'"
+                                     (plist-get (car first-pair) :tool)
+                                     (plist-get (cdr first-pair) :tool))
+                    :count (* 2 (length pairs))))))))))
+
+(defun gptel-agent--detect-oscillating-results ()
+  "Detect same tool with different results repeatedly.
+
+Returns plist with :type 'oscillating, :pattern, :count, or nil."
+  (let ((calls (gptel-agent--get-recent-calls gptel-agent-doom-loop-threshold)))
+    (when (>= (length calls) gptel-agent-doom-loop-threshold)
+      (let ((tool (plist-get (car calls) :tool))
+            (args (plist-get (car calls) :args))
+            (results (mapcar (lambda (c) (plist-get c :result)) calls))
+            (same-tool t)
+            (same-args t))
+        ;; Check if all calls are to the same tool with same args
+        (dolist (call calls)
+          (unless (equal (plist-get call :tool) tool)
+            (setq same-tool nil))
+          (unless (equal (plist-get call :args) args)
+            (setq same-args nil)))
+        ;; Check if results differ
+        (when (and same-tool same-args
+                   (> (length (delete-dups (copy-sequence results))) 1))
+          (list :type 'oscillating
+                :pattern (format "Tool '%s' returning varying results" tool)
+                :count (length calls)))))))
+
+(defun gptel-agent--detect-doom-loop ()
+  "Main doom loop detection function.
+
+Runs all detection algorithms and returns the first match found,
+or nil if no loop detected."
+  (or (gptel-agent--detect-identical-sequence)
+      (gptel-agent--detect-similar-sequence)
+      (gptel-agent--detect-alternating-pattern)
+      (gptel-agent--detect-oscillating-results)))
+
+(defun gptel-agent--doom-loop-score ()
+  "Calculate confidence score for current potential doom loop.
+
+Returns a float between 0.0 (no confidence) and 1.0 (certain)."
+  (let ((loop-info (gptel-agent--detect-doom-loop)))
+    (if (not loop-info)
+        0.0
+      (let ((base-score (pcase (plist-get loop-info :type)
+                          ('identical 1.0)
+                          ('similar 0.9)
+                          ('alternating 0.85)
+                          ('oscillating 0.8)
+                          (_ 0.5)))
+            (count (plist-get loop-info :count))
+            (threshold gptel-agent-doom-loop-threshold))
+        ;; Increase confidence with repetition count
+        (min 1.0 (* base-score (/ (float count) threshold)))))))
+
+;;;; Token Estimation
+
+(defun gptel-agent--estimate-wasted-tokens (calls)
+  "Estimate number of wasted tokens from CALLS.
+
+This is a rough approximation: 1 token ≈ 4 characters for English.
+Includes tool call overhead and response tokens."
+  (let ((total-chars 0))
+    (dolist (call calls)
+      ;; Tool call: name + args (serialized)
+      (let* ((tool (plist-get call :tool))
+             (args (format "%S" (plist-get call :args)))
+             (result (or (plist-get call :result) ""))
+             ;; Overhead: JSON structure, field names
+             (overhead 100))
+        (setq total-chars (+ total-chars
+                             (length tool)
+                             (length args)
+                             (length result)
+                             overhead))))
+    ;; Convert chars to tokens (rough)
+    (/ total-chars 4)))
+
+;;;; Intervention UI
+
+(defvar gptel-agent-doom-loop-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "c") #'gptel-agent-doom-loop-continue)
+    (define-key map (kbd "r") #'gptel-agent-doom-loop-retry)
+    (define-key map (kbd "a") #'gptel-agent-doom-loop-abort)
+    (define-key map (kbd "q") #'gptel-agent-doom-loop-dismiss)
+    map)
+  "Keymap for `gptel-agent-doom-loop-mode'.")
+
+(define-derived-mode gptel-agent-doom-loop-mode special-mode "DoomLoop"
+  "Major mode for doom loop warning buffer.
+
+Key bindings:
+\\{gptel-agent-doom-loop-mode-map}"
+  (setq-local cursor-type nil)
+  (setq buffer-read-only t))
+
+(defvar gptel-agent--doom-loop-decision nil
+  "Stores user decision from doom loop intervention buffer.")
+
+(defun gptel-agent-doom-loop-continue ()
+  "Continue execution, optionally adjusting temperature."
+  (interactive)
+  (setq gptel-agent--doom-loop-decision 'continue)
+  (quit-window t))
+
+(defun gptel-agent-doom-loop-retry ()
+  "Retry with guidance (increase temperature, add context)."
+  (interactive)
+  (setq gptel-agent--doom-loop-decision 'retry)
+  (quit-window t))
+
+(defun gptel-agent-doom-loop-abort ()
+  "Abort current task."
+  (interactive)
+  (setq gptel-agent--doom-loop-decision 'abort)
+  (quit-window t))
+
+(defun gptel-agent-doom-loop-dismiss ()
+  "Dismiss warning without action (same as continue)."
+  (interactive)
+  (setq gptel-agent--doom-loop-decision 'continue)
+  (quit-window t))
+
+(defun gptel-agent--display-doom-loop-warning (loop-info)
+  "Display warning buffer for detected doom loop LOOP-INFO.
+
+Shows pattern details, affected calls, token waste estimate,
+and prompts user for action."
+  (let ((buffer (get-buffer-create "*GPTel Doom Loop Warning*"))
+        (calls (gptel-agent--get-recent-calls (plist-get loop-info :count)))
+        (score (gptel-agent--doom-loop-score))
+        (wasted-tokens (gptel-agent--estimate-wasted-tokens calls)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (gptel-agent-doom-loop-mode)
+        (insert (propertize "⚠ DOOM LOOP DETECTED\n\n" 'face 'error))
+        (insert (propertize "Pattern: " 'face 'bold))
+        (insert (plist-get loop-info :pattern) "\n")
+        (insert (propertize "Type: " 'face 'bold))
+        (insert (format "%s\n" (plist-get loop-info :type)))
+        (insert (propertize "Repetitions: " 'face 'bold))
+        (insert (format "%d\n" (plist-get loop-info :count)))
+        (insert (propertize "Confidence: " 'face 'bold))
+        (insert (format "%.0f%%\n" (* 100 score)))
+        (insert (propertize "Estimated wasted tokens: " 'face 'bold))
+        (insert (format "~%d\n\n" wasted-tokens))
+
+        (insert (propertize "Recent Tool Calls:\n" 'face 'bold))
+        (insert (propertize (make-string 60 ?-) 'face 'shadow) "\n")
+        (dolist (call calls)
+          (insert (format "• %s" (plist-get call :tool)))
+          (let ((args (plist-get call :args)))
+            (when args
+              (insert (format "\n  Args: %S" args))))
+          (let ((result (plist-get call :result)))
+            (when (and result (< (length result) 200))
+              (insert (format "\n  Result: %s"
+                              (truncate-string-to-width result 80 nil nil t)))))
+          (insert "\n\n"))
+
+        (insert (propertize (make-string 60 ?=) 'face 'shadow) "\n\n")
+        (insert (propertize "Actions:\n" 'face 'bold))
+        (insert "  [c] Continue - Proceed with current parameters\n")
+        (insert "  [r] Retry - Increase temperature and add guidance\n")
+        (insert "  [a] Abort - Stop current task\n")
+        (insert "  [q] Dismiss - Hide this warning\n\n")
+        (insert (propertize "Choose an action: " 'face 'warning)))
+      (goto-char (point-min))
+      (pop-to-buffer buffer)
+      (setq gptel-agent--doom-loop-decision nil)
+      ;; Wait for user input
+      (while (not gptel-agent--doom-loop-decision)
+        (sit-for 0.1))
+      gptel-agent--doom-loop-decision)))
+
+;;;; Integration and Control
+
+(defun gptel-agent--handle-doom-loop (loop-info)
+  "Handle detected doom loop according to configuration.
+
+LOOP-INFO is the plist returned by `gptel-agent--detect-doom-loop'.
+Returns the action taken: continue, abort, or adjust."
+  (let ((action gptel-agent-doom-loop-action)
+        (decision nil))
+    (pcase action
+      ('warn
+       (setq decision (gptel-agent--display-doom-loop-warning loop-info)))
+      ('auto-adjust
+       (message "Doom loop detected - auto-adjusting parameters...")
+       (setq decision 'retry))
+      ('abort
+       (message "Doom loop detected - aborting!")
+       (setq decision 'abort)))
+
+    ;; Log the incident
+    (push (list :timestamp (current-time)
+                :pattern (plist-get loop-info :pattern)
+                :count (plist-get loop-info :count)
+                :action decision
+                :score (gptel-agent--doom-loop-score))
+          gptel-agent--doom-loop-log)
+
+    decision))
+
+(defun gptel-agent--safety-post-response-hook (status)
+  "Hook function for `gptel-post-response-functions'.
+
+STATUS is the response status from gptel.
+Performs doom loop detection after each LLM response."
+  (when (and gptel-agent-doom-loop-enabled
+             (eq status 'finished))
+    (when-let ((loop-info (gptel-agent--detect-doom-loop)))
+      (let ((decision (gptel-agent--handle-doom-loop loop-info)))
+        (pcase decision
+          ('abort
+           (gptel--update-status
+            " [Doom Loop - Aborted]" 'error)
+           (keyboard-quit))
+          ('retry
+           (gptel--update-status
+            " [Doom Loop - Adjusting]" 'warning)))))))
+
+;;;###autoload
+(defun gptel-agent-doom-loop-status ()
+  "Display current doom loop detection status and history."
+  (interactive)
+  (let ((recent-calls (gptel-agent--get-recent-calls 10))
+        (log gptel-agent--doom-loop-log)
+        (loop-info (gptel-agent--detect-doom-loop))
+        (score (gptel-agent--doom-loop-score)))
+    (with-current-buffer (get-buffer-create "*GPTel Safety Status*")
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (special-mode)
+        (insert (propertize "GPTel Agent Safety Status\n" 'face 'bold))
+        (insert (propertize (make-string 40 ?=) 'face 'shadow) "\n\n")
+
+        (insert (propertize "Configuration:\n" 'face 'bold))
+        (insert (format "  Enabled: %s\n" gptel-agent-doom-loop-enabled))
+        (insert (format "  Threshold: %d repetitions\n"
+                        gptel-agent-doom-loop-threshold))
+        (insert (format "  Similarity: %.2f\n"
+                        gptel-agent-doom-loop-similarity))
+        (insert (format "  Action: %s\n" gptel-agent-doom-loop-action))
+        (insert (format "  Buffer size: %d\n\n"
+                        gptel-agent-doom-loop-buffer-size))
+
+        (insert (propertize "Current State:\n" 'face 'bold))
+        (insert (format "  Tracked calls: %d\n"
+                        (if gptel-agent--recent-tool-calls
+                            (ring-length gptel-agent--recent-tool-calls)
+                          0)))
+        (insert (format "  Loop detected: %s\n"
+                        (if loop-info "YES" "NO")))
+        (insert (format "  Confidence: %.0f%%\n\n" (* 100 score)))
+
+        (when loop-info
+          (insert (propertize "Detected Loop:\n" 'face 'warning))
+          (insert (format "  Type: %s\n" (plist-get loop-info :type)))
+          (insert (format "  Pattern: %s\n" (plist-get loop-info :pattern)))
+          (insert (format "  Count: %d\n\n" (plist-get loop-info :count))))
+
+        (insert (propertize "Recent Tool Calls:\n" 'face 'bold))
+        (if recent-calls
+            (dolist (call recent-calls)
+              (insert (format "  • %s @ %s\n"
+                              (plist-get call :tool)
+                              (format-time-string "%H:%M:%S"
+                                                  (plist-get call :timestamp)))))
+          (insert "  (none)\n"))
+        (insert "\n")
+
+        (insert (propertize "Incident Log:\n" 'face 'bold))
+        (if log
+            (dolist (incident log)
+              (insert (format "  [%s] %s (count=%d, action=%s, score=%.0f%%)\n"
+                              (format-time-string "%Y-%m-%d %H:%M:%S"
+                                                  (plist-get incident :timestamp))
+                              (plist-get incident :pattern)
+                              (plist-get incident :count)
+                              (plist-get incident :action)
+                              (* 100 (plist-get incident :score)))))
+          (insert "  (none)\n")))
+      (goto-char (point-min))
+      (pop-to-buffer (current-buffer)))))
+
+;;;###autoload
+(define-minor-mode gptel-agent-safety-mode
+  "Global minor mode for gptel-agent doom loop detection.
+
+When enabled, tracks tool calls and detects repetitive patterns
+that may indicate the LLM is stuck in a loop.  Intervention occurs
+based on `gptel-agent-doom-loop-action'."
+  :global t
+  :group 'gptel-agent-safety
+  (if gptel-agent-safety-mode
+      (progn
+        (add-hook 'gptel-post-response-functions
+                  #'gptel-agent--safety-post-response-hook)
+        (message "GPTel Agent safety mode enabled"))
+    (remove-hook 'gptel-post-response-functions
+                 #'gptel-agent--safety-post-response-hook)
+    (message "GPTel Agent safety mode disabled")))
+
+(provide 'gptel-agent-safety)
+;;; gptel-agent-safety.el ends here

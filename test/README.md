@@ -54,6 +54,18 @@ Comprehensive tests for the permissions module covering:
 - **Tool Name Normalization**: Case-insensitive tool name handling
 - **Integration**: End-to-end permission checking scenarios
 
+### gptel-agent-safety-test.el
+
+Comprehensive tests for the doom loop detection module covering:
+
+- **Ring Buffer Management**: Tracking tool calls, retrieval order, overflow behavior, clearing
+- **Pattern Detection**: Identical sequences, similar sequences, alternating patterns, oscillating results
+- **Argument Normalization**: Path expansion, whitespace trimming, plist/list handling
+- **Token Estimation**: Calculating wasted tokens from repetitive calls
+- **Score Calculation**: Confidence scoring for detected patterns
+- **Configuration**: Threshold effects, similarity tuning, buffer sizing
+- **Edge Cases**: Empty buffers, nil args, complex nested structures, boundary conditions
+
 ### Test Structure
 
 Tests follow ERT conventions:
