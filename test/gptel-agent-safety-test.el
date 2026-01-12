@@ -11,15 +11,24 @@
 
 ;;; Commentary:
 
-;; Comprehensive tests for gptel-agent-safety.el doom loop detection.
+;; Comprehensive tests for gptel-agent-safety.el doom loop detection
+;; and external directory access control.
 ;;
-;; Test coverage:
+;; Test coverage - Doom Loop Detection:
 ;; - Ring buffer management (tracking, retrieval, overflow, clearing)
 ;; - Pattern detection (identical, similar, alternating, oscillating)
 ;; - Argument normalization (paths, whitespace, types)
 ;; - Token estimation
 ;; - Score calculation
 ;; - Configuration effects
+;;
+;; Test coverage - External Directory Access Control (FR-014):
+;; - Path normalization (~, relative, absolute)
+;; - Boundary detection and caching
+;; - Whitelist matching (exact, directory, glob patterns)
+;; - Access policies (allow, ask, deny)
+;; - Path extraction from bash commands
+;; - Customization defaults
 
 ;;; Code:
 
@@ -559,6 +568,304 @@ TOOL is the tool name, ARGS are arguments, RESULT is optional result."
    ;; Add one more to reach threshold
    (gptel-agent--track-tool-call "Read" '(:file "test.el") "content")
    (should (gptel-agent--detect-doom-loop))))
+
+;;;; =====================================================================
+;;;; External Directory Access Control Tests (FR-014)
+;;;; =====================================================================
+
+;;;; Boundary Detection Tests
+
+(defvar gptel-agent-safety-test--temp-dirs nil
+  "List of temporary directories to clean up after tests.")
+
+(defun gptel-agent-safety-test--make-temp-project ()
+  "Create a temporary project directory for testing.
+Returns the path to the created directory."
+  (let ((dir (make-temp-file "gptel-agent-safety-test-" t)))
+    (push dir gptel-agent-safety-test--temp-dirs)
+    dir))
+
+(defun gptel-agent-safety-test--cleanup-dirs ()
+  "Clean up temporary directories."
+  (dolist (dir gptel-agent-safety-test--temp-dirs)
+    (when (file-directory-p dir)
+      (delete-directory dir t)))
+  (setq gptel-agent-safety-test--temp-dirs nil))
+
+(defmacro gptel-agent-safety-test--with-temp-project (dir-var &rest body)
+  "Create temp project, bind to DIR-VAR, execute BODY, cleanup."
+  (declare (indent 1))
+  `(unwind-protect
+       (let ((,dir-var (gptel-agent-safety-test--make-temp-project)))
+         ,@body)
+     (gptel-agent-safety-test--cleanup-dirs)))
+
+(ert-deftest gptel-agent-safety-test-normalize-path-expands-tilde ()
+  "Test path normalization expands ~ to home directory."
+  (let ((result (gptel-agent--normalize-path "~/test.txt")))
+    (should (stringp result))
+    (should (string-prefix-p "/" result))
+    (should-not (string-prefix-p "~" result))))
+
+(ert-deftest gptel-agent-safety-test-normalize-path-relative ()
+  "Test path normalization handles relative paths."
+  (let ((result (gptel-agent--normalize-path "foo/bar.txt")))
+    (should (stringp result))
+    (should (string-prefix-p "/" result))
+    (should (string-match-p "foo/bar.txt$" result))))
+
+(ert-deftest gptel-agent-safety-test-normalize-path-nil ()
+  "Test path normalization returns nil for nil input."
+  (should (null (gptel-agent--normalize-path nil))))
+
+(ert-deftest gptel-agent-safety-test-normalize-path-non-string ()
+  "Test path normalization returns nil for non-string input."
+  (should (null (gptel-agent--normalize-path 123))))
+
+(ert-deftest gptel-agent-safety-test-path-within-boundary ()
+  "Test path within boundary returns non-nil."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let* ((gptel-agent--project-boundary-cache nil)
+           (default-directory project-dir)
+           (subfile (expand-file-name "subdir/file.txt" project-dir)))
+      ;; Mock the boundary detection to use our temp dir
+      (setq gptel-agent--project-boundary-cache
+            (list :boundary project-dir
+                  :timestamp (current-time)
+                  :whitelist nil))
+      (should (gptel-agent--path-within-boundary-p subfile)))))
+
+(ert-deftest gptel-agent-safety-test-path-outside-boundary ()
+  "Test path outside boundary returns nil."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let* ((gptel-agent--project-boundary-cache nil)
+           (external-path "/tmp/completely-outside.txt"))
+      (setq gptel-agent--project-boundary-cache
+            (list :boundary project-dir
+                  :timestamp (current-time)
+                  :whitelist nil))
+      (should-not (gptel-agent--path-within-boundary-p external-path)))))
+
+;;;; Whitelist Tests
+
+(ert-deftest gptel-agent-safety-test-path-in-whitelist-exact ()
+  "Test exact path match in whitelist."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let ((gptel-agent-external-path-whitelist '("/tmp/allowed.txt"))
+          (gptel-agent--project-boundary-cache
+           (list :boundary project-dir
+                 :timestamp (current-time)
+                 :whitelist nil)))
+      (should (gptel-agent--path-in-whitelist-p "/tmp/allowed.txt"))
+      (should-not (gptel-agent--path-in-whitelist-p "/tmp/notallowed.txt")))))
+
+(ert-deftest gptel-agent-safety-test-path-in-whitelist-directory ()
+  "Test directory prefix match in whitelist."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let ((gptel-agent-external-path-whitelist '("/tmp/allowed-dir/"))
+          (gptel-agent--project-boundary-cache
+           (list :boundary project-dir
+                 :timestamp (current-time)
+                 :whitelist nil)))
+      (should (gptel-agent--path-in-whitelist-p "/tmp/allowed-dir/file.txt"))
+      (should (gptel-agent--path-in-whitelist-p "/tmp/allowed-dir/sub/file.txt"))
+      (should-not (gptel-agent--path-in-whitelist-p "/tmp/other-dir/file.txt")))))
+
+(ert-deftest gptel-agent-safety-test-path-in-whitelist-glob ()
+  "Test glob pattern match in whitelist."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let ((gptel-agent-external-path-whitelist '("/tmp/*.log"))
+          (gptel-agent--project-boundary-cache
+           (list :boundary project-dir
+                 :timestamp (current-time)
+                 :whitelist nil)))
+      (should (gptel-agent--path-in-whitelist-p "/tmp/app.log"))
+      (should (gptel-agent--path-in-whitelist-p "/tmp/error.log"))
+      (should-not (gptel-agent--path-in-whitelist-p "/tmp/app.txt")))))
+
+(ert-deftest gptel-agent-safety-test-path-in-whitelist-project ()
+  "Test project-level whitelist from config."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let ((gptel-agent-external-path-whitelist nil)
+          (gptel-agent--project-boundary-cache
+           (list :boundary project-dir
+                 :timestamp (current-time)
+                 :whitelist '("/tmp/project-allowed/"))))
+      (should (gptel-agent--path-in-whitelist-p "/tmp/project-allowed/file.txt"))
+      (should-not (gptel-agent--path-in-whitelist-p "/tmp/other/file.txt")))))
+
+;;;; Access Policy Tests
+
+(ert-deftest gptel-agent-safety-test-check-access-within-boundary ()
+  "Test access check for paths within boundary."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let* ((gptel-agent--project-boundary-cache
+            (list :boundary project-dir
+                  :timestamp (current-time)
+                  :whitelist nil))
+           (internal-file (expand-file-name "test.txt" project-dir)))
+      (should (eq (gptel-agent--check-path-access internal-file 'read) 'allow))
+      (should (eq (gptel-agent--check-path-access internal-file 'write) 'allow)))))
+
+(ert-deftest gptel-agent-safety-test-check-access-whitelist ()
+  "Test access check for whitelisted paths."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let ((gptel-agent-external-path-whitelist '("/tmp/allowed/"))
+          (gptel-agent--project-boundary-cache
+           (list :boundary project-dir
+                 :timestamp (current-time)
+                 :whitelist nil)))
+      (should (eq (gptel-agent--check-path-access "/tmp/allowed/file.txt" 'read)
+                  'allow-with-warning))
+      (should (eq (gptel-agent--check-path-access "/tmp/allowed/file.txt" 'write)
+                  'allow-with-warning)))))
+
+(ert-deftest gptel-agent-safety-test-check-access-external-read-allow ()
+  "Test external read access with allow policy."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let ((gptel-agent-external-path-whitelist nil)
+          (gptel-agent-external-read-policy 'allow)
+          (gptel-agent--project-boundary-cache
+           (list :boundary project-dir
+                 :timestamp (current-time)
+                 :whitelist nil)))
+      (should (eq (gptel-agent--check-path-access "/external/file.txt" 'read)
+                  'allow-with-warning)))))
+
+(ert-deftest gptel-agent-safety-test-check-access-external-read-ask ()
+  "Test external read access with ask policy."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let ((gptel-agent-external-path-whitelist nil)
+          (gptel-agent-external-read-policy 'ask)
+          (gptel-agent--project-boundary-cache
+           (list :boundary project-dir
+                 :timestamp (current-time)
+                 :whitelist nil)))
+      (should (eq (gptel-agent--check-path-access "/external/file.txt" 'read)
+                  'ask)))))
+
+(ert-deftest gptel-agent-safety-test-check-access-external-read-deny ()
+  "Test external read access with deny policy."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let ((gptel-agent-external-path-whitelist nil)
+          (gptel-agent-external-read-policy 'deny)
+          (gptel-agent--project-boundary-cache
+           (list :boundary project-dir
+                 :timestamp (current-time)
+                 :whitelist nil)))
+      (should (eq (gptel-agent--check-path-access "/external/file.txt" 'read)
+                  'deny)))))
+
+(ert-deftest gptel-agent-safety-test-check-access-external-write-deny ()
+  "Test external write access with deny policy (default)."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (let ((gptel-agent-external-path-whitelist nil)
+          (gptel-agent-external-write-policy 'deny)
+          (gptel-agent--project-boundary-cache
+           (list :boundary project-dir
+                 :timestamp (current-time)
+                 :whitelist nil)))
+      (should (eq (gptel-agent--check-path-access "/external/file.txt" 'write)
+                  'deny))
+      (should (eq (gptel-agent--check-path-access "/external/file.txt" 'edit)
+                  'deny)))))
+
+;;;; Path Extraction Tests
+
+(ert-deftest gptel-agent-safety-test-extract-paths-cat ()
+  "Test path extraction from cat command."
+  (let ((paths (gptel-agent--extract-paths-from-bash-command "cat /etc/passwd")))
+    (should (member "/etc/passwd" paths))))
+
+(ert-deftest gptel-agent-safety-test-extract-paths-head-tail ()
+  "Test path extraction from head and tail commands."
+  (let ((paths-head (gptel-agent--extract-paths-from-bash-command "head -n 10 /var/log/syslog"))
+        (paths-tail (gptel-agent--extract-paths-from-bash-command "tail -f /var/log/messages")))
+    (should (member "/var/log/syslog" paths-head))
+    (should (member "/var/log/messages" paths-tail))))
+
+(ert-deftest gptel-agent-safety-test-extract-paths-redirection ()
+  "Test path extraction from output redirection."
+  (let ((paths (gptel-agent--extract-paths-from-bash-command "echo test > /tmp/output.txt")))
+    (should (member "/tmp/output.txt" paths))))
+
+(ert-deftest gptel-agent-safety-test-extract-paths-cp-mv ()
+  "Test path extraction from cp and mv commands."
+  (let ((paths-cp (gptel-agent--extract-paths-from-bash-command "cp /source/file.txt /dest/file.txt"))
+        (paths-mv (gptel-agent--extract-paths-from-bash-command "mv /old/path /new/path")))
+    (should (member "/source/file.txt" paths-cp))
+    (should (member "/dest/file.txt" paths-cp))
+    (should (member "/old/path" paths-mv))
+    (should (member "/new/path" paths-mv))))
+
+(ert-deftest gptel-agent-safety-test-extract-paths-rm ()
+  "Test path extraction from rm command."
+  (let ((paths (gptel-agent--extract-paths-from-bash-command "rm -rf /tmp/delete-me")))
+    (should (member "/tmp/delete-me" paths))))
+
+(ert-deftest gptel-agent-safety-test-extract-paths-mkdir ()
+  "Test path extraction from mkdir command."
+  (let ((paths (gptel-agent--extract-paths-from-bash-command "mkdir -p /new/directory/path")))
+    (should (member "/new/directory/path" paths))))
+
+(ert-deftest gptel-agent-safety-test-extract-paths-none ()
+  "Test path extraction returns empty for commands without paths."
+  (let ((paths (gptel-agent--extract-paths-from-bash-command "echo hello world")))
+    (should (or (null paths) (cl-every (lambda (p) (not (string-prefix-p "/" p))) paths)))))
+
+;;;; Glob Pattern Tests
+
+(ert-deftest gptel-agent-safety-test-glob-match-star ()
+  "Test glob matching with single asterisk."
+  (let ((gptel-agent-external-path-whitelist nil)
+        (gptel-agent--project-boundary-cache nil))
+    (should (gptel-agent--path-matches-glob-p "/tmp/test.log" "/tmp/*.log"))
+    (should (gptel-agent--path-matches-glob-p "/tmp/app.log" "/tmp/*.log"))
+    (should-not (gptel-agent--path-matches-glob-p "/tmp/test.txt" "/tmp/*.log"))
+    (should-not (gptel-agent--path-matches-glob-p "/var/test.log" "/tmp/*.log"))))
+
+(ert-deftest gptel-agent-safety-test-glob-match-question ()
+  "Test glob matching with question mark."
+  (let ((gptel-agent-external-path-whitelist nil)
+        (gptel-agent--project-boundary-cache nil))
+    (should (gptel-agent--path-matches-glob-p "/tmp/file1.txt" "/tmp/file?.txt"))
+    (should (gptel-agent--path-matches-glob-p "/tmp/fileA.txt" "/tmp/file?.txt"))
+    (should-not (gptel-agent--path-matches-glob-p "/tmp/file12.txt" "/tmp/file?.txt"))))
+
+;;;; Cache Tests
+
+(ert-deftest gptel-agent-safety-test-invalidate-cache ()
+  "Test boundary cache invalidation."
+  (gptel-agent-safety-test--with-temp-project project-dir
+    (setq gptel-agent--project-boundary-cache
+          (list :boundary project-dir
+                :timestamp (current-time)
+                :whitelist nil))
+    (should gptel-agent--project-boundary-cache)
+    (gptel-agent--invalidate-boundary-cache)
+    (should (null gptel-agent--project-boundary-cache))))
+
+;;;; Customization Tests
+
+(ert-deftest gptel-agent-safety-test-external-path-whitelist-default ()
+  "Test default value for external path whitelist."
+  (should (null (default-value 'gptel-agent-external-path-whitelist))))
+
+(ert-deftest gptel-agent-safety-test-external-read-policy-default ()
+  "Test default value for external read policy."
+  (should (eq (default-value 'gptel-agent-external-read-policy) 'ask)))
+
+(ert-deftest gptel-agent-safety-test-external-write-policy-default ()
+  "Test default value for external write policy."
+  (should (eq (default-value 'gptel-agent-external-write-policy) 'deny)))
+
+(ert-deftest gptel-agent-safety-test-resolve-symlinks-default ()
+  "Test default value for symlink resolution."
+  (should (default-value 'gptel-agent-resolve-symlinks)))
+
+(ert-deftest gptel-agent-safety-test-show-warnings-default ()
+  "Test default value for showing warnings."
+  (should (default-value 'gptel-agent-show-external-warnings)))
 
 (provide 'gptel-agent-safety-test)
 ;;; gptel-agent-safety-test.el ends here

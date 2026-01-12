@@ -633,5 +633,336 @@ based on `gptel-agent-doom-loop-action'."
                  #'gptel-agent--safety-post-response-hook)
     (message "GPTel Agent safety mode disabled")))
 
+;;;; =====================================================================
+;;;; External Directory Access Control (FR-014)
+;;;; =====================================================================
+
+;; This section implements protection against accidental file operations
+;; outside project boundaries.
+
+;;;; Directory Access Customization
+
+(defgroup gptel-agent-boundary nil
+  "External directory access control for gptel-agent."
+  :group 'gptel-agent-safety
+  :prefix "gptel-agent-boundary-")
+
+(defcustom gptel-agent-external-path-whitelist nil
+  "Global whitelist of external paths that are always allowed.
+
+List of paths that should be accessible outside the project boundary.
+Paths should be absolute. Directory paths should end with '/'.
+Glob patterns are supported (* for any characters, ** for recursive).
+
+Examples:
+  (\"/tmp/\" \"~/.config/\" \"/var/log/*.log\")"
+  :type '(repeat string)
+  :group 'gptel-agent-boundary)
+
+(defcustom gptel-agent-external-read-policy 'ask
+  "Policy for reading files outside project boundary.
+
+- `allow': Always allow reading external files (with warning)
+- `ask': Ask for permission via the approval system
+- `deny': Deny all external file reads"
+  :type '(choice (const :tag "Allow with warning" allow)
+                 (const :tag "Ask for permission" ask)
+                 (const :tag "Deny access" deny))
+  :group 'gptel-agent-boundary)
+
+(defcustom gptel-agent-external-write-policy 'deny
+  "Policy for writing files outside project boundary.
+
+- `allow': Allow writing external files (with warning)
+- `ask': Ask for permission via the approval system
+- `deny': Deny all external file writes"
+  :type '(choice (const :tag "Allow with warning" allow)
+                 (const :tag "Ask for permission" ask)
+                 (const :tag "Deny access" deny))
+  :group 'gptel-agent-boundary)
+
+(defcustom gptel-agent-resolve-symlinks t
+  "Whether to resolve symlinks when checking path boundaries.
+
+If non-nil (default), symlinks are resolved before boundary checks
+to prevent symlink-based boundary escapes."
+  :type 'boolean
+  :group 'gptel-agent-boundary)
+
+(defcustom gptel-agent-show-external-warnings t
+  "Whether to show visual warnings for external path access.
+
+When non-nil, accessing paths outside the boundary triggers a visual
+warning even when access is allowed."
+  :type 'boolean
+  :group 'gptel-agent-boundary)
+
+;;;; Directory Access Variables
+
+(defvar-local gptel-agent--project-boundary-cache nil
+  "Cached project boundary for current buffer.
+
+Plist containing :boundary PATH :timestamp TIME :whitelist LIST")
+
+;;;; Project Boundary Detection
+
+(defun gptel-agent--get-project-boundary ()
+  "Get the project boundary for access control.
+
+Returns the project root using project.el, or falls back to
+`default-directory'. Custom boundaries from .gptel-agent.el override.
+
+The result is cached per-buffer for performance."
+  ;; Check cache validity
+  (let ((cached-boundary (plist-get gptel-agent--project-boundary-cache :boundary))
+        (cached-time (plist-get gptel-agent--project-boundary-cache :timestamp)))
+    (if (and cached-boundary
+             cached-time
+             (< (float-time (time-subtract (current-time) cached-time)) 60))
+        cached-boundary
+      ;; Compute fresh boundary
+      (let* ((boundary
+              (or
+               ;; Check for custom boundary in project config
+               (gptel-agent--get-config-boundary)
+               ;; Use project.el
+               (when-let* ((proj (and (fboundp 'project-current)
+                                      (project-current nil)))
+                           (root (and (fboundp 'project-root)
+                                      (project-root proj))))
+                 (expand-file-name root))
+               ;; Fallback to default-directory
+               (expand-file-name default-directory)))
+             (whitelist (gptel-agent--get-config-whitelist)))
+        ;; Cache result
+        (setq gptel-agent--project-boundary-cache
+              (list :boundary boundary
+                    :timestamp (current-time)
+                    :whitelist whitelist))
+        boundary))))
+
+(defun gptel-agent--get-config-boundary ()
+  "Get custom boundary from .gptel-agent.el configuration."
+  (when-let* ((root (and (fboundp 'gptel-agent--project-root)
+                         (gptel-agent--project-root)))
+              (file (expand-file-name ".gptel-agent.el" root))
+              ((file-exists-p file)))
+    (condition-case nil
+        (with-temp-buffer
+          (insert-file-contents file)
+          (let ((config (read (current-buffer))))
+            (when (and (listp config)
+                       (eq (car config) 'gptel-agent-project-config))
+              (when-let ((custom (plist-get (cdr config) :project-boundary)))
+                (expand-file-name custom root)))))
+      (error nil))))
+
+(defun gptel-agent--get-config-whitelist ()
+  "Get external paths whitelist from .gptel-agent.el configuration."
+  (when-let* ((root (and (fboundp 'gptel-agent--project-root)
+                         (gptel-agent--project-root)))
+              (file (expand-file-name ".gptel-agent.el" root))
+              ((file-exists-p file)))
+    (condition-case nil
+        (with-temp-buffer
+          (insert-file-contents file)
+          (let ((config (read (current-buffer))))
+            (when (and (listp config)
+                       (eq (car config) 'gptel-agent-project-config))
+              (plist-get (cdr config) :external-paths))))
+      (error nil))))
+
+(defun gptel-agent--invalidate-boundary-cache ()
+  "Invalidate the project boundary cache."
+  (setq gptel-agent--project-boundary-cache nil))
+
+;;;; Path Normalization
+
+(defun gptel-agent--normalize-path (path)
+  "Normalize PATH for boundary checking.
+
+Expands ~ and relative paths, optionally resolves symlinks.
+Returns an absolute, canonical path."
+  (when (and path (stringp path))
+    (let ((expanded (expand-file-name path)))
+      (if (and gptel-agent-resolve-symlinks
+               (file-exists-p expanded))
+          (file-truename expanded)
+        expanded))))
+
+;;;; Path Checking Functions
+
+(defun gptel-agent--path-within-boundary-p (path)
+  "Check if PATH is within the project boundary.
+
+Returns non-nil if PATH is inside the project boundary."
+  (when-let* ((normalized (gptel-agent--normalize-path path))
+              (boundary (gptel-agent--get-project-boundary)))
+    (file-in-directory-p normalized boundary)))
+
+(defun gptel-agent--path-matches-glob-p (path pattern)
+  "Check if PATH matches glob PATTERN.
+
+Supports * for any characters and ** for recursive directories."
+  (let* ((pattern (expand-file-name pattern))
+         ;; Convert glob to regex
+         (regex (concat "^"
+                        (replace-regexp-in-string
+                         "\\*\\*" "\\\\(.+/\\\\)?"
+                         (replace-regexp-in-string
+                          "\\*" "[^/]*"
+                          (replace-regexp-in-string
+                           "\\?" "."
+                           (regexp-quote pattern))))
+                        "$")))
+    (string-match-p regex (gptel-agent--normalize-path path))))
+
+(defun gptel-agent--path-in-whitelist-p (path)
+  "Check if PATH is in the whitelist.
+
+Checks both global `gptel-agent-external-path-whitelist' and
+project-level :external-paths configuration."
+  (let* ((normalized (gptel-agent--normalize-path path))
+         (project-whitelist (plist-get gptel-agent--project-boundary-cache :whitelist))
+         (all-whitelist (append gptel-agent-external-path-whitelist project-whitelist)))
+    (cl-some
+     (lambda (entry)
+       (let ((entry-expanded (expand-file-name entry)))
+         (or
+          ;; Exact match
+          (string= normalized entry-expanded)
+          ;; Directory prefix (entry ends with /)
+          (and (string-suffix-p "/" entry-expanded)
+               (string-prefix-p entry-expanded normalized))
+          ;; Glob pattern match
+          (gptel-agent--path-matches-glob-p normalized entry))))
+     all-whitelist)))
+
+(defun gptel-agent--check-path-access (path operation)
+  "Check if PATH access for OPERATION is allowed.
+
+OPERATION is one of: `read', `write', `edit', `execute'.
+Returns:
+  - `allow': Access is allowed (proceed)
+  - `allow-with-warning': Access allowed but show warning
+  - `ask': Need to ask for permission
+  - `deny': Access denied"
+  (let* ((normalized (gptel-agent--normalize-path path))
+         (within-boundary (gptel-agent--path-within-boundary-p normalized))
+         (in-whitelist (gptel-agent--path-in-whitelist-p normalized))
+         (policy (pcase operation
+                   ((or 'read) gptel-agent-external-read-policy)
+                   ((or 'write 'edit 'execute) gptel-agent-external-write-policy)
+                   (_ gptel-agent-external-write-policy))))
+
+    (cond
+     ;; Within project boundary - always allow
+     (within-boundary 'allow)
+
+     ;; In whitelist - allow with warning
+     (in-whitelist 'allow-with-warning)
+
+     ;; Apply policy
+     (t (pcase policy
+          ('allow 'allow-with-warning)
+          ('ask 'ask)
+          ('deny 'deny))))))
+
+;;;; Visual Warning System
+
+(defface gptel-agent-external-path-warning
+  '((t :background "dark orange" :foreground "black" :weight bold))
+  "Face for external path access warnings."
+  :group 'gptel-agent-boundary)
+
+(defun gptel-agent--show-external-path-warning (path operation)
+  "Display warning for external PATH access with OPERATION."
+  (when gptel-agent-show-external-warnings
+    (let* ((boundary (gptel-agent--get-project-boundary))
+           (in-whitelist (gptel-agent--path-in-whitelist-p path))
+           (msg (if in-whitelist
+                    (format "Whitelisted external path: %s" path)
+                  (format "External %s: %s (outside %s)"
+                          operation path
+                          (abbreviate-file-name boundary)))))
+      (message "%s" (propertize msg 'face 'gptel-agent-external-path-warning)))))
+
+;;;; Path Extraction from Commands
+
+(defun gptel-agent--extract-paths-from-bash-command (cmd)
+  "Extract file paths from bash command CMD.
+
+Returns a list of potential file paths found in the command."
+  (let ((paths nil))
+    ;; Common patterns for file operations
+    (dolist (pattern '(
+                       ;; cat, head, tail, less, more
+                       "\\<\\(cat\\|head\\|tail\\|less\\|more\\)\\s-+\\([^ |;&<>]+\\)"
+                       ;; echo with redirection
+                       ">+\\s-*\\([^ |;&]+\\)"
+                       ;; cp, mv - extract both source and dest
+                       "\\<\\(cp\\|mv\\)\\s-+\\([^ ]+\\)\\s-+\\([^ ]+\\)"
+                       ;; rm
+                       "\\<rm\\s-+\\(?:-[rf]+\\s-+\\)?\\([^ |;&]+\\)"
+                       ;; touch, mkdir
+                       "\\<\\(touch\\|mkdir\\)\\s-+\\(?:-[p]+\\s-+\\)?\\([^ |;&]+\\)"
+                       ;; chmod, chown
+                       "\\<\\(chmod\\|chown\\)\\s-+[^ ]+\\s-+\\([^ |;&]+\\)"
+                       ))
+      (let ((pos 0))
+        (while (string-match pattern cmd pos)
+          (dotimes (n (/ (length (match-data)) 2))
+            (when-let ((match (match-string n cmd)))
+              (when (and (string-match-p "^[/~.]" match)
+                         (not (string-match-p "^-" match)))
+                (push match paths))))
+          (setq pos (match-end 0)))))
+    (delete-dups paths)))
+
+;;;; Integration Functions
+
+(defun gptel-agent--check-file-access (path operation)
+  "Check file access for PATH with OPERATION, handling results.
+
+Returns non-nil if access should proceed, nil if denied.
+Shows warnings and integrates with permission system as needed."
+  (let ((access (gptel-agent--check-path-access path operation)))
+    (pcase access
+      ('allow t)
+      ('allow-with-warning
+       (gptel-agent--show-external-path-warning path operation)
+       t)
+      ('ask
+       ;; Integrate with transient permission system if available
+       (if (fboundp 'gptel-agent-request-approval)
+           (let ((result nil)
+                 (done nil))
+             (gptel-agent-request-approval
+              'external-path
+              (list :path path :operation operation)
+              (lambda (decision)
+                (setq result (memq decision
+                                   '(approve-once approve-session approve-project)))
+                (setq done t)))
+             ;; Wait for decision (simple blocking approach)
+             (while (not done) (sit-for 0.1))
+             result)
+         ;; No permission system - fall back to y-or-n-p
+         (y-or-n-p (format "Allow %s access to external path %s? "
+                           operation path))))
+      ('deny
+       (message "Access denied: %s is outside project boundary" path)
+       nil))))
+
+(defun gptel-agent--check-bash-command-paths (cmd)
+  "Check all paths in bash CMD for access permission.
+
+Returns non-nil if all paths are allowed, nil if any denied."
+  (let ((paths (gptel-agent--extract-paths-from-bash-command cmd)))
+    (cl-every
+     (lambda (path)
+       (gptel-agent--check-file-access path 'execute))
+     paths)))
+
 (provide 'gptel-agent-safety)
 ;;; gptel-agent-safety.el ends here

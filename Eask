@@ -12,7 +12,8 @@
        "gptel-agent-tools-introspection.el"
        "gptel-agent-permissions.el"
        "gptel-agent-safety.el"
-       "gptel-agent-compaction.el")
+       "gptel-agent-compaction.el"
+       "gptel-agent-transient.el")
 
 (script "test" "eask test ert test/*.el")
 (script "lint" "eask lint package")
