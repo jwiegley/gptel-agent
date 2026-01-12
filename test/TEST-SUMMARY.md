@@ -8,13 +8,16 @@ Comprehensive test suite with **41 test cases** covering all aspects of the perm
 ### 2. gptel-agent-safety-test.el
 Comprehensive test suite with **46 test cases** covering all aspects of the doom loop detection module.
 
-### 3. run-tests.el
+### 3. gptel-agent-compaction-test.el
+Comprehensive test suite with **54 test cases** covering all aspects of the compaction module.
+
+### 4. run-tests.el
 Batch test runner script for automated testing.
 
-### 4. README.md
+### 5. README.md
 Complete documentation for running and writing tests.
 
-### 5. TEST-SUMMARY.md
+### 6. TEST-SUMMARY.md
 This file - overview of the test suite.
 
 ## Test Coverage
@@ -151,6 +154,98 @@ This file - overview of the test suite.
 
 ---
 
+## gptel-agent-compaction Tests
+
+### Token Estimation Tests (5 tests)
+- `gptel-agent-compaction-test-estimate-tokens-basic`: Basic 4-char-per-token estimation
+- `gptel-agent-compaction-test-estimate-tokens-nil`: Nil input handling
+- `gptel-agent-compaction-test-estimate-tokens-non-string`: Non-string input handling
+- `gptel-agent-compaction-test-count-message-tokens`: Message plist token counting
+- `gptel-agent-compaction-test-count-message-tokens-empty`: Empty message handling
+
+### Model Factor Tests (3 tests)
+- `gptel-agent-compaction-test-get-model-factor-default`: Default factor (1.0)
+- `gptel-agent-compaction-test-get-model-factor-claude`: Claude model factor
+- `gptel-agent-compaction-test-get-model-factor-gemini`: Gemini model factor
+
+### Context Limit Detection Tests (5 tests)
+- `gptel-agent-compaction-test-context-limit-override`: Manual override support
+- `gptel-agent-compaction-test-context-limit-claude`: Claude limit detection (200K)
+- `gptel-agent-compaction-test-context-limit-gpt4`: GPT-4 limit detection (128K)
+- `gptel-agent-compaction-test-context-limit-unknown`: Unknown model fallback
+- `gptel-agent-compaction-test-context-limit-gemini`: Gemini limit detection (1M)
+
+### Message Compactability Tests (6 tests)
+- `gptel-agent-compaction-test-compactable-user-message`: User messages compactable
+- `gptel-agent-compaction-test-compactable-assistant-message`: Assistant messages compactable
+- `gptel-agent-compaction-test-not-compactable-system`: System messages protected
+- `gptel-agent-compaction-test-not-compactable-tool-calls`: Tool calls protected
+- `gptel-agent-compaction-test-not-compactable-tool-result`: Tool results protected
+- `gptel-agent-compaction-test-not-compactable-important`: Important flag protection
+
+### Message Marking Tests (4 tests)
+- `gptel-agent-compaction-test-mark-compactability-basic`: Basic marking
+- `gptel-agent-compaction-test-mark-compactability-task-marker`: Task marker detection
+- `gptel-agent-compaction-test-mark-compactability-no-task-marker`: Non-task messages
+- `gptel-agent-compaction-test-mark-compactability-case-insensitive`: Case insensitivity
+
+### Format and Summary Tests (3 tests)
+- `gptel-agent-compaction-test-format-messages`: Message formatting for summary
+- `gptel-agent-compaction-test-format-messages-empty`: Empty list formatting
+- `gptel-agent-compaction-test-insert-summary`: Summary message creation
+
+### Threshold Tests (3 tests)
+- `gptel-agent-compaction-test-threshold-default`: Default 0.7 threshold
+- `gptel-agent-compaction-test-threshold-trigger`: Above threshold detection
+- `gptel-agent-compaction-test-threshold-no-trigger`: Below threshold handling
+
+### Strategy Tests (2 tests)
+- `gptel-agent-compaction-test-strategy-default`: Default summarize strategy
+- `gptel-agent-compaction-test-strategy-valid-values`: Strategy validation
+
+### Configuration Tests (4 tests)
+- `gptel-agent-compaction-test-preserved-count-default`: Default preserved count
+- `gptel-agent-compaction-test-preserved-count-affects-sliding-window`: Window calculation
+- `gptel-agent-compaction-test-summarization-model-default`: Default model (nil)
+- `gptel-agent-compaction-test-notify-default`: Notifications enabled
+
+### Modeline Indicator Tests (3 tests)
+- `gptel-agent-compaction-test-modeline-indicator-format`: Format string output
+- `gptel-agent-compaction-test-modeline-indicator-colors`: Color coding by usage
+- `gptel-agent-compaction-test-modeline-indicator-nil-outside-gptel`: Mode check
+
+### Token Factors Tests (2 tests)
+- `gptel-agent-compaction-test-token-factors-structure`: Data structure validation
+- `gptel-agent-compaction-test-token-factors-values`: Value range validation
+
+### Known Limits Tests (2 tests)
+- `gptel-agent-compaction-test-known-limits-structure`: Data structure validation
+- `gptel-agent-compaction-test-known-limits-values`: Value range validation
+
+### Session State Tests (2 tests)
+- `gptel-agent-compaction-test-session-token-count-initial`: Initial count is 0
+- `gptel-agent-compaction-test-summarization-in-progress-initial`: Initial state nil
+
+### Task Markers Tests (2 tests)
+- `gptel-agent-compaction-test-task-markers-default`: Default markers present
+- `gptel-agent-compaction-test-task-markers-detection`: Position-independent detection
+
+### Edge Cases Tests (4 tests)
+- `gptel-agent-compaction-test-empty-conversation`: Empty conversation handling
+- `gptel-agent-compaction-test-very-long-message`: Large message estimation
+- `gptel-agent-compaction-test-unicode-content`: Unicode text handling
+- `gptel-agent-compaction-test-zero-context-limit`: Zero division protection
+
+### Summarization Prompt Tests (2 tests)
+- `gptel-agent-compaction-test-summarization-prompt-format`: Placeholder presence
+- `gptel-agent-compaction-test-summarization-prompt-content`: Instruction content
+
+### Integration Tests (2 tests)
+- `gptel-agent-compaction-test-full-workflow`: Complete workflow logic
+- `gptel-agent-compaction-test-check-compaction-needed`: Need detection
+
+---
+
 ## Test Infrastructure
 
 ### Test Helpers
@@ -261,6 +356,7 @@ Tests verify:
 ### Completed
 - ✅ **gptel-agent-permissions**: 41 comprehensive tests covering all permission functionality
 - ✅ **gptel-agent-safety**: 46 comprehensive tests covering all doom loop detection functionality
+- ✅ **gptel-agent-compaction**: 54 comprehensive tests covering all compaction functionality
 
 ### Future Enhancements
 

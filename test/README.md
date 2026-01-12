@@ -66,6 +66,20 @@ Comprehensive tests for the doom loop detection module covering:
 - **Configuration**: Threshold effects, similarity tuning, buffer sizing
 - **Edge Cases**: Empty buffers, nil args, complex nested structures, boundary conditions
 
+### gptel-agent-compaction-test.el
+
+Comprehensive tests for the prompt compaction module covering:
+
+- **Token Estimation**: Basic estimation, nil/non-string handling, message token counting
+- **Model Factors**: Model-specific adjustment factors for token counting
+- **Context Limits**: Auto-detection for Claude/GPT/Gemini, manual override, fallback
+- **Message Compactability**: System/tool/important message protection
+- **Message Marking**: Task marker detection, case-insensitive matching
+- **Strategies**: Summarize, truncate, hybrid strategy validation
+- **Configuration**: Thresholds, preserved counts, notification settings
+- **Modeline Indicator**: Format, color coding, mode detection
+- **Edge Cases**: Unicode, very long messages, zero limits, empty conversations
+
 ### Test Structure
 
 Tests follow ERT conventions:
