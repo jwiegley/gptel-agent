@@ -37,6 +37,8 @@
                              (file-name-directory load-file-name)))
 (load-file (expand-file-name "gptel-agent-sessions-test.el"
                              (file-name-directory load-file-name)))
+(load-file (expand-file-name "gptel-agent-stats-test.el"
+                             (file-name-directory load-file-name)))
 
 ;; Run all tests
 (ert-run-tests-batch-and-exit)
