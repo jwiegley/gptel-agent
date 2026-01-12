@@ -727,7 +727,18 @@ Interactively, prompts for session and output file."
 (defun gptel-agent-resume ()
   "Resume a previous gptel-agent session.
 
-Prompts for session selection and loads it into a new buffer."
+Display a completion interface listing all saved sessions with
+their names, project directories, message counts, and timestamps.
+Archived sessions are marked with [A].
+
+After selecting a session, load its conversation history and
+state into the current buffer.  The session's messages, system
+prompt, and settings are restored.
+
+Sessions are stored in SQLite (when available) or JSON fallback.
+See `gptel-agent-session-db-file' for storage location.
+
+Returns the loaded session plist or nil if cancelled."
   (interactive)
   (let* ((sessions (gptel-agent-session-list))
          (choices (mapcar (lambda (s)
@@ -851,7 +862,19 @@ Prompts for session selection and loads it into a new buffer."
 
 ;;;###autoload
 (defun gptel-agent-sessions ()
-  "Open the session management buffer."
+  "Open the session management buffer.
+
+Display a tabulated list of all saved gptel-agent sessions.
+Each row shows session name, project, message count, update time,
+and archive status.
+
+Key bindings in the session list:
+  \\[gptel-agent-sessions-resume]     Resume the selected session
+  \\[gptel-agent-sessions-mark-delete]     Mark session for deletion
+  \\[gptel-agent-sessions-execute]     Execute marked deletions
+  \\[gptel-agent-sessions-export]     Export session to Markdown
+  \\[gptel-agent-sessions-toggle-archive]     Toggle archive status
+  \\[gptel-agent-sessions-refresh]     Refresh the session list"
   (interactive)
   (unless gptel-agent--storage-backend
     (gptel-agent--init-storage))

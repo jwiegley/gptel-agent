@@ -115,7 +115,21 @@ any templates to the system prompt."
 
 ;;;###autoload
 (defun gptel-agent-update ()
-  "Update agent definitions from `gptel-agent-dirs'."
+  "Update agent definitions from `gptel-agent-dirs'.
+
+Scan all directories in `gptel-agent-dirs' for Markdown (.md) and
+Org (.org) files containing sub-agent definitions.  Each file is
+parsed for frontmatter/properties and registered as an available
+sub-agent.
+
+After parsing, this function updates the Agent tool's enum with
+the list of available agents and applies the gptel-agent and
+gptel-plan presets if they exist.
+
+Call this function after modifying agent definition files or
+adding new agents to directories in `gptel-agent-dirs'.
+
+Returns the alist of all registered agents."
   ;; First pass: discover all agents and collect their file paths
   (setq gptel-agent--agents nil)
   (let ((agent-files nil))              ; Alist of (agent-name . file-path)
@@ -369,10 +383,27 @@ Signals an error if:
 
 ;;;###autoload
 (defun gptel-agent (&optional project-dir agent-preset)
-  "Start a `gptel-agent' session in the current project.
+  "Start a gptel-agent session in the current project.
 
-With optional prefix arg, query for PROJECT-DIR.  Load AGENT-PRESET in
-this session, which defaults to the default `gptel-agent'."
+This is the main entry point for gptel-agent.  It creates a new
+gptel buffer configured with agent capabilities including tool
+use, sub-agent delegation, and autonomous task execution.
+
+PROJECT-DIR is the root directory for the agent session.  With a
+prefix argument, prompt for the directory.  Without prefix, use
+the current project root or `default-directory'.
+
+AGENT-PRESET is the preset to apply (default: \\='gptel-agent).
+Use \\='gptel-plan for read-only planning mode.
+
+The created buffer includes:
+- Header line with mode switching between Agent and Plan modes
+- Access to all registered tools
+- Integration with session persistence and checkpoints
+
+Key bindings in the agent buffer:
+- Click on [Agent]/[Plan] to switch modes
+- Use \\='gptel-send' to send messages as usual"
   (interactive
    (list (if current-prefix-arg
              (funcall project-prompter)
