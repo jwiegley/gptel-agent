@@ -29,6 +29,8 @@
                              (file-name-directory load-file-name)))
 (load-file (expand-file-name "gptel-agent-compaction-test.el"
                              (file-name-directory load-file-name)))
+(load-file (expand-file-name "gptel-agent-transient-test.el"
+                             (file-name-directory load-file-name)))
 
 ;; Run all tests
 (ert-run-tests-batch-and-exit)
