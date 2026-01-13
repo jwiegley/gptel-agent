@@ -10,6 +10,7 @@
 (files "gptel-agent.el"
        "gptel-agent-tools.el"
        "gptel-agent-tools-introspection.el"
+       "gptel-agent-lsp.el"
        "gptel-agent-permissions.el"
        "gptel-agent-safety.el"
        "gptel-agent-compaction.el"
