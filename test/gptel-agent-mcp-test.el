@@ -15,6 +15,12 @@
 (require 'ert)
 (require 'gptel-agent-mcp)
 
+;; Declare mcp.el variables for testing without requiring the full library
+(defvar mcp-server-connections nil
+  "Hash table of MCP server connections (defined in mcp.el).")
+(defvar mcp-hub-servers nil
+  "List of global MCP hub servers (defined in mcp-hub.el).")
+
 ;;;; Test Fixtures
 
 (defconst gptel-agent-mcp-test--sample-config
@@ -61,8 +67,13 @@
     (should (equal (gptel-agent--expand-env-var "no vars here")
                    "no vars here"))
 
-    ;; Partial match (should not expand)
+    ;; Greedy match - $TEST_VARsuffix is treated as one variable name
+    ;; (matches standard shell behavior - use ${VAR}suffix for embedded vars)
     (should (equal (gptel-agent--expand-env-var "prefix$TEST_VARsuffix")
+                   "prefix"))
+
+    ;; Brace syntax works for embedded variables
+    (should (equal (gptel-agent--expand-env-var "prefix${TEST_VAR}suffix")
                    "prefixhellosuffix"))))
 
 (ert-deftest gptel-agent-mcp-test-expand-env-var-edge-cases ()
@@ -76,9 +87,9 @@
     (should (equal (gptel-agent--expand-env-var "$")
                    "$"))
 
-    ;; Empty braces
+    ;; Empty braces - invalid syntax, left unchanged
     (should (equal (gptel-agent--expand-env-var "${}")
-                   ""))
+                   "${}"))
 
     ;; Non-string input
     (should (null (gptel-agent--expand-env-var nil)))

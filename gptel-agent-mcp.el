@@ -132,7 +132,8 @@ environment variables replaced by their values."
        (let ((var-name (or (match-string 2 match)
                            (match-string 3 match))))
          (or (getenv var-name) "")))
-     string)))
+     string
+     t)))  ; FIXEDCASE - preserve original case of replacement
 
 (defun gptel-agent--expand-mcp-config (config)
   "Expand environment variables in MCP server CONFIG.
