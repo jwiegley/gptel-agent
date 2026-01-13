@@ -45,6 +45,8 @@
                              (file-name-directory load-file-name)))
 (load-file (expand-file-name "gptel-agent-lsp-test.el"
                              (file-name-directory load-file-name)))
+(load-file (expand-file-name "gptel-agent-mcp-test.el"
+                             (file-name-directory load-file-name)))
 
 ;; Run all tests
 (ert-run-tests-batch-and-exit)
