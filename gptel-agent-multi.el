@@ -256,20 +256,21 @@ Returns the number of sessions closed."
                         (lambda (s) (plist-get s :idle-p))
                         sessions))
          (closed 0))
-    (unless idle-sessions
-      (message "No idle sessions found")
-      (cl-return-from gptel-agent-close-idle-sessions 0))
-    (dolist (session idle-sessions)
-      (let* ((buffer (plist-get session :buffer))
-             (name (plist-get session :name))
-             (idle (plist-get session :idle)))
-        (when (or force
-                  (y-or-n-p (format "Close idle session '%s' (idle %ds)? "
-                                   name idle)))
-          (kill-buffer buffer)
-          (cl-incf closed))))
-    (message "Closed %d idle session%s" closed (if (= closed 1) "" "s"))
-    closed))
+    (if (not idle-sessions)
+        (progn
+          (message "No idle sessions found")
+          0)
+      (dolist (session idle-sessions)
+        (let* ((buffer (plist-get session :buffer))
+               (name (plist-get session :name))
+               (idle (plist-get session :idle)))
+          (when (or force
+                    (y-or-n-p (format "Close idle session '%s' (idle %ds)? "
+                                     name idle)))
+            (kill-buffer buffer)
+            (cl-incf closed))))
+      (message "Closed %d idle session%s" closed (if (= closed 1) "" "s"))
+      closed)))
 
 ;;;###autoload
 (defun gptel-agent-rename-session (new-name)
