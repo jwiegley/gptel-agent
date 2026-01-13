@@ -218,13 +218,15 @@ Returns the buffer object with initialized session metadata."
     (let ((buf1 (gptel-agent-multi-test--create-mock-session "old" "/tmp/"))
           (buf2 (gptel-agent-multi-test--create-mock-session "new" "/tmp/")))
       (gptel-agent--register-session buf1)
-      (sleep-for 0.1)
+      ;; Sleep longer than 1 second so idle times differ after rounding
+      (sleep-for 1.1)
       (gptel-agent--register-session buf2)
       ;; Update buf2 to make it most recent
       (gptel-agent--update-activity buf2)
       (let ((sessions (gptel-agent--get-active-sessions)))
-        ;; Most recent (buf2) should be first
-        (should (eq (plist-get (car sessions) :buffer) buf2))))))
+        ;; Most recent (buf2 with name "new") should be first
+        ;; Compare by name to avoid ERT's post-test buffer comparison issues
+        (should (equal (plist-get (car sessions) :name) "new"))))))
 
 ;;;; Session Renaming Tests
 

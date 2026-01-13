@@ -163,7 +163,8 @@ Returns the tool struct or nil if not found."
 (ert-deftest gptel-agent-lsp-test-hover-file-not-found ()
   "Test hover operation when file doesn't exist."
   (let ((gptel-agent-lsp-enable t))
-    (cl-letf (((symbol-function 'eglot-current-server) (lambda () t)))
+    (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+              ((symbol-function 'eglot-current-server) (lambda () t)))
       (should (string-match-p "not found"
                               (gptel-agent-lsp--hover "/nonexistent/file.el"))))))
 
@@ -176,8 +177,13 @@ Returns the tool struct or nil if not found."
           (with-temp-file test-file
             (insert "(defun test ())"))
           (with-current-buffer (find-file-noselect test-file)
-            (cl-letf (((symbol-function 'eglot-current-server)
-                       (lambda () (error "Mock LSP error"))))
+            ;; Mock featurep to return t for eglot
+            ;; Mock eglot-current-server to return a truthy value (passes availability check)
+            ;; Mock eglot--request to throw an error (tests error handling in LSP operation)
+            (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                      ((symbol-function 'eglot-current-server) (lambda () 'mock-server))
+                      ((symbol-function 'eglot--request)
+                       (lambda (&rest _) (error "Mock LSP error"))))
               (should (string-match-p "LSP error"
                                       (gptel-agent-lsp--symbols test-file))))))
       (when (file-exists-p test-file)
