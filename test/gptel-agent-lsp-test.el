@@ -26,21 +26,31 @@
 (require 'ert)
 (require 'gptel-agent-lsp)
 
+;;; Helper Functions
+
+(defun gptel-agent-lsp-test--get-tool ()
+  "Get the LSP tool from the gptel registry.
+Returns the tool struct or nil if not found."
+  (when (boundp 'gptel--known-tools)
+    (cdr (assoc "LSP" (cdr (assoc "gptel-agent" gptel--known-tools))))))
+
 ;;; Tool Registration Tests
 
 (ert-deftest gptel-agent-lsp-test-tool-registered ()
   "Test that LSP tool is properly registered."
-  (should (assoc "LSP" gptel--tool-alist)))
+  (should (gptel-agent-lsp-test--get-tool)))
 
 (ert-deftest gptel-agent-lsp-test-tool-category ()
   "Test that LSP tool has correct category."
-  (let ((tool (cdr (assoc "LSP" gptel--tool-alist))))
-    (should (equal (plist-get tool :category) "gptel-agent"))))
+  (let ((tool (gptel-agent-lsp-test--get-tool)))
+    (should tool)
+    (should (equal (gptel-tool-category tool) "gptel-agent"))))
 
 (ert-deftest gptel-agent-lsp-test-tool-args ()
   "Test that LSP tool has correct arguments defined."
-  (let* ((tool (cdr (assoc "LSP" gptel--tool-alist)))
-         (args (plist-get tool :args)))
+  (let* ((tool (gptel-agent-lsp-test--get-tool))
+         (args (gptel-tool-args tool)))
+    (should tool)
     (should (= (length args) 5))
     (should (equal (plist-get (nth 0 args) :name) "operation"))
     (should (equal (plist-get (nth 1 args) :name) "file"))
@@ -177,15 +187,15 @@
 
 (ert-deftest gptel-agent-lsp-test-tool-invalid-operation ()
   "Test tool function with invalid operation."
-  (let* ((tool (cdr (assoc "LSP" gptel--tool-alist)))
-         (fn (plist-get tool :function))
+  (let* ((tool (gptel-agent-lsp-test--get-tool))
+         (fn (gptel-tool-function tool))
          (result (funcall fn "invalid" "test.el")))
     (should (string-match-p "Unknown operation" result))))
 
 (ert-deftest gptel-agent-lsp-test-tool-valid-operations ()
   "Test that all valid operations are recognized."
-  (let* ((tool (cdr (assoc "LSP" gptel--tool-alist)))
-         (fn (plist-get tool :function))
+  (let* ((tool (gptel-agent-lsp-test--get-tool))
+         (fn (gptel-tool-function tool))
          (operations '("definitions" "references" "hover" "symbols" "implementations"))
          (gptel-agent-lsp-enable nil))
     (dolist (op operations)
