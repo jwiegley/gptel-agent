@@ -21,6 +21,7 @@
        "gptel-agent-multi.el"
        "gptel-agent-stats.el"
        "gptel-agent-checkpoints.el"
+       "gptel-agent-mcp.el"
        "gptel-agent.texi"
        "CHANGELOG.md")
 
