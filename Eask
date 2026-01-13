@@ -17,6 +17,7 @@
        "gptel-agent-skills.el"
        "gptel-agent-modes.el"
        "gptel-agent-sessions.el"
+       "gptel-agent-multi.el"
        "gptel-agent-stats.el"
        "gptel-agent-checkpoints.el"
        "gptel-agent.texi"
