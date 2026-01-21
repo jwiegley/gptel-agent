@@ -345,9 +345,11 @@ Returns MESSAGE with :compactable property set."
   (let ((compactable (gptel-agent--message-compactable-p message))
         (content (plist-get message :content)))
     ;; Check for task markers
+    ;; Use word boundary at start but not at end, since markers often
+    ;; include punctuation (e.g., "task:")
     (when (and compactable (stringp content))
       (dolist (marker gptel-agent-task-markers)
-        (when (string-match-p (concat "\\<" (regexp-quote marker) "\\>")
+        (when (string-match-p (concat "\\<" (regexp-quote marker))
                               (downcase content))
           (setq compactable nil))))
     (plist-put message :compactable compactable)
@@ -432,7 +434,7 @@ Returns the summary message plist."
     ;; TODO: Insert into actual gptel buffer at appropriate position
     summary-msg))
 
-(defun gptel-agent--summarize-context ()
+(cl-defun gptel-agent--summarize-context ()
   "Summarize old messages using LLM asynchronously.
 
 Uses `gptel-request' to generate a concise summary of compactable
@@ -506,7 +508,7 @@ Returns when initial truncation completes. Summarization continues async."
 
 ;;;; Main Compaction Entry Point
 
-(defun gptel-agent-compact-context (&optional force)
+(cl-defun gptel-agent-compact-context (&optional force)
   "Compact the conversation context using configured strategy.
 
 If FORCE is non-nil (interactively, with prefix arg), perform

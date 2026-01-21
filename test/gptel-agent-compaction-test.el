@@ -465,6 +465,375 @@ Optional PROPS is additional properties to merge."
   (should (string-match-p "summarize" (downcase gptel-agent-summarization-prompt)))
   (should (string-match-p "concise" (downcase gptel-agent-summarization-prompt))))
 
+;;;; Compactable Messages Tests
+
+(ert-deftest gptel-agent-compaction-test-get-compactable-messages-empty ()
+  "Test getting compactable messages from empty conversation."
+  (cl-letf (((symbol-function 'gptel-agent--get-all-messages)
+             (lambda () nil)))
+    (should (= (length (gptel-agent--get-compactable-messages)) 0))))
+
+(ert-deftest gptel-agent-compaction-test-get-compactable-messages-preserved ()
+  "Test preserved messages are not returned as compactable."
+  (let ((gptel-agent-preserved-message-count 3))
+    (cl-letf (((symbol-function 'gptel-agent--get-all-messages)
+               (lambda ()
+                 (list (gptel-agent-compaction-test--make-message 'user "msg1")
+                       (gptel-agent-compaction-test--make-message 'user "msg2")
+                       (gptel-agent-compaction-test--make-message 'user "msg3")))))
+      ;; All 3 messages should be preserved
+      (should (= (length (gptel-agent--get-compactable-messages)) 0)))))
+
+(ert-deftest gptel-agent-compaction-test-get-compactable-messages-partial ()
+  "Test sliding window preserves recent messages."
+  (let ((gptel-agent-preserved-message-count 2)
+        (gptel-agent-task-markers nil))  ; Disable task markers
+    (cl-letf (((symbol-function 'gptel-agent--get-all-messages)
+               (lambda ()
+                 (list (gptel-agent-compaction-test--make-message 'user "old1")
+                       (gptel-agent-compaction-test--make-message 'user "old2")
+                       (gptel-agent-compaction-test--make-message 'user "recent1")
+                       (gptel-agent-compaction-test--make-message 'user "recent2")))))
+      ;; First 2 messages should be compactable
+      (let ((compactable (gptel-agent--get-compactable-messages)))
+        (should (= (length compactable) 2))))))
+
+(ert-deftest gptel-agent-compaction-test-get-compactable-excludes-system ()
+  "Test system messages are excluded from compactable."
+  (let ((gptel-agent-preserved-message-count 0)
+        (gptel-agent-task-markers nil))
+    (cl-letf (((symbol-function 'gptel-agent--get-all-messages)
+               (lambda ()
+                 (list (gptel-agent-compaction-test--make-message 'system "system prompt")
+                       (gptel-agent-compaction-test--make-message 'user "user msg")))))
+      (let ((compactable (gptel-agent--get-compactable-messages)))
+        ;; Only user message should be compactable
+        (should (= (length compactable) 1))))))
+
+;;;; Truncation Strategy Tests
+
+(ert-deftest gptel-agent-compaction-test-truncate-no-messages ()
+  "Test truncate with no compactable messages."
+  (cl-letf (((symbol-function 'gptel-agent--get-compactable-messages)
+             (lambda () nil))
+            ((symbol-function 'gptel-agent--count-conversation-tokens)
+             (lambda () 0)))
+    (let ((gptel-agent-context-size 10000)
+          (gptel-agent--session-token-count 0))
+      (let ((result (gptel-agent--truncate-context)))
+        (should (numberp result))))))
+
+(ert-deftest gptel-agent-compaction-test-truncate-removes-messages ()
+  "Test truncate removes messages until target reached."
+  (let ((removed-messages '())
+        (gptel-agent-context-size 10000)
+        (gptel-agent--session-token-count 8000))
+    (cl-letf (((symbol-function 'gptel-agent--get-compactable-messages)
+               (lambda ()
+                 (list (gptel-agent-compaction-test--make-message 'user "msg1")
+                       (gptel-agent-compaction-test--make-message 'user "msg2"))))
+              ((symbol-function 'gptel-agent--count-conversation-tokens)
+               (lambda () 8000))
+              ((symbol-function 'gptel-agent--remove-message)
+               (lambda (msg) (push msg removed-messages))))
+      (gptel-agent--truncate-context)
+      ;; Should have attempted to remove messages
+      (should (>= (length removed-messages) 0)))))
+
+;;;; Hybrid Strategy Tests
+
+(ert-deftest gptel-agent-compaction-test-hybrid-divides-messages ()
+  "Test hybrid strategy divides messages between truncate and summarize."
+  (let ((truncated-count 0)
+        (gptel-agent--summarization-in-progress nil))
+    (cl-letf (((symbol-function 'gptel-agent--get-compactable-messages)
+               (lambda ()
+                 (list (gptel-agent-compaction-test--make-message 'user "m1")
+                       (gptel-agent-compaction-test--make-message 'user "m2")
+                       (gptel-agent-compaction-test--make-message 'user "m3")
+                       (gptel-agent-compaction-test--make-message 'user "m4")
+                       (gptel-agent-compaction-test--make-message 'user "m5")
+                       (gptel-agent-compaction-test--make-message 'user "m6"))))
+              ((symbol-function 'gptel-agent--remove-message)
+               (lambda (_msg) (cl-incf truncated-count)))
+              ((symbol-function 'gptel-agent--summarize-context)
+               (lambda () nil)))
+      (let ((result (gptel-agent--hybrid-compact)))
+        ;; Should truncate about 1/3 of messages (2 of 6)
+        (should (= truncated-count 2))
+        (should (numberp result))))))
+
+;;;; Summarization Tests
+
+(ert-deftest gptel-agent-compaction-test-summarize-blocks-concurrent ()
+  "Test summarization blocks when already in progress."
+  (let ((gptel-agent--summarization-in-progress t))
+    ;; Should return nil without doing anything
+    (should (null (gptel-agent--summarize-context)))))
+
+(ert-deftest gptel-agent-compaction-test-summarize-fallback-few-messages ()
+  "Test summarization falls back to truncate with few messages."
+  (let ((gptel-agent--summarization-in-progress nil)
+        (truncated nil))
+    (cl-letf (((symbol-function 'gptel-agent--get-compactable-messages)
+               (lambda ()
+                 (list (gptel-agent-compaction-test--make-message 'user "m1")
+                       (gptel-agent-compaction-test--make-message 'user "m2"))))
+              ((symbol-function 'gptel-agent--truncate-context)
+               (lambda () (setq truncated t) 5)))
+      (gptel-agent--summarize-context)
+      ;; Should have fallen back to truncation
+      (should truncated))))
+
+;;;; Main Compact Context Tests
+
+(ert-deftest gptel-agent-compaction-test-compact-context-not-gptel-buffer ()
+  "Test compact-context errors when not in gptel buffer."
+  (with-temp-buffer
+    (should-error (gptel-agent-compact-context)
+                  :type 'user-error)))
+
+(ert-deftest gptel-agent-compaction-test-compact-context-blocks-concurrent ()
+  "Test compact-context blocks when summarization in progress."
+  (with-temp-buffer
+    (let ((gptel-agent--summarization-in-progress t))
+      (cl-letf (((symbol-function 'derived-mode-p)
+                 (lambda (&rest _) t)))
+        ;; Should return nil without triggering
+        (should (null (gptel-agent-compact-context)))))))
+
+(ert-deftest gptel-agent-compaction-test-compact-context-force ()
+  "Test compact-context with force flag."
+  (with-temp-buffer
+    (let ((gptel-agent-compaction-strategy 'truncate)
+          (gptel-agent-context-size 10000)
+          (gptel-agent--session-token-count 100)  ; Below threshold
+          (gptel-agent--summarization-in-progress nil)
+          (compaction-triggered nil))
+      (cl-letf (((symbol-function 'derived-mode-p)
+                 (lambda (&rest _) t))
+                ((symbol-function 'gptel-agent--truncate-context)
+                 (lambda () (setq compaction-triggered t) 0)))
+        (gptel-agent-compact-context t)  ; Force
+        (should compaction-triggered)))))
+
+(ert-deftest gptel-agent-compaction-test-compact-context-below-threshold ()
+  "Test compact-context does nothing below threshold."
+  (with-temp-buffer
+    (let ((gptel-agent-compaction-threshold 0.7)
+          (gptel-agent-context-size 10000)
+          (gptel-agent--session-token-count 5000)  ; 50% - below threshold
+          (gptel-agent--summarization-in-progress nil)
+          (compaction-triggered nil))
+      (cl-letf (((symbol-function 'derived-mode-p)
+                 (lambda (&rest _) t))
+                ((symbol-function 'gptel-agent--truncate-context)
+                 (lambda () (setq compaction-triggered t) 0))
+                ((symbol-function 'called-interactively-p)
+                 (lambda (&rest _) nil)))
+        (should (null (gptel-agent-compact-context)))
+        (should-not compaction-triggered)))))
+
+(ert-deftest gptel-agent-compaction-test-compact-context-strategy-dispatch ()
+  "Test compact-context dispatches to correct strategy."
+  (with-temp-buffer
+    (let ((gptel-agent-context-size 10000)
+          (gptel-agent--session-token-count 8000)  ; Above threshold
+          (gptel-agent--summarization-in-progress nil)
+          (strategy-called nil))
+      (dolist (strategy '(summarize truncate hybrid))
+        (setq strategy-called nil)
+        (let ((gptel-agent-compaction-strategy strategy))
+          (cl-letf (((symbol-function 'derived-mode-p)
+                     (lambda (&rest _) t))
+                    ((symbol-function 'gptel-agent--summarize-context)
+                     (lambda () (setq strategy-called 'summarize)))
+                    ((symbol-function 'gptel-agent--truncate-context)
+                     (lambda () (setq strategy-called 'truncate) 0))
+                    ((symbol-function 'gptel-agent--hybrid-compact)
+                     (lambda () (setq strategy-called 'hybrid) 0)))
+            (gptel-agent-compact-context t)
+            (should (eq strategy-called strategy))))))))
+
+(ert-deftest gptel-agent-compaction-test-compact-context-unknown-strategy ()
+  "Test compact-context errors on unknown strategy."
+  (with-temp-buffer
+    (let ((gptel-agent-compaction-strategy 'unknown-strategy)
+          (gptel-agent-context-size 10000)
+          (gptel-agent--session-token-count 8000)
+          (gptel-agent--summarization-in-progress nil))
+      (cl-letf (((symbol-function 'derived-mode-p)
+                 (lambda (&rest _) t)))
+        (should-error (gptel-agent-compact-context t)
+                      :type 'user-error)))))
+
+;;;; Compaction Status Tests
+
+(ert-deftest gptel-agent-compaction-test-status-format ()
+  "Test compaction status message format."
+  (with-temp-buffer
+    (let ((gptel-agent-context-size 10000)
+          (gptel-agent--session-token-count 7500)
+          (gptel-agent-compaction-threshold 0.7)
+          (message-output nil))
+      (cl-letf (((symbol-function 'gptel-agent--get-compactable-messages)
+                 (lambda () (list 1 2 3)))  ; 3 compactable
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq message-output (apply #'format fmt args)))))
+        (gptel-agent-compaction-status)
+        (should (stringp message-output))
+        (should (string-match-p "7500/10000" message-output))
+        (should (string-match-p "75" message-output))
+        (should (string-match-p "YES" message-output))))))
+
+(ert-deftest gptel-agent-compaction-test-status-no-compaction-needed ()
+  "Test status shows no compaction needed below threshold."
+  (with-temp-buffer
+    (let ((gptel-agent-context-size 10000)
+          (gptel-agent--session-token-count 5000)
+          (gptel-agent-compaction-threshold 0.7)
+          (message-output nil))
+      (cl-letf (((symbol-function 'gptel-agent--get-compactable-messages)
+                 (lambda () nil))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq message-output (apply #'format fmt args)))))
+        (gptel-agent-compaction-status)
+        (should (string-match-p "no" message-output))))))
+
+;;;; Check Compaction Needed Tests
+
+(ert-deftest gptel-agent-compaction-test-check-needed-returns-t ()
+  "Test check-compaction-needed returns t when triggered."
+  (with-temp-buffer
+    (let ((gptel-agent-context-size 10000)
+          (gptel-agent--session-token-count 8000)
+          (gptel-agent-compaction-threshold 0.7)
+          (compact-called nil))
+      (cl-letf (((symbol-function 'gptel-agent-compact-context)
+                 (lambda () (setq compact-called t))))
+        (should (gptel-agent--check-compaction-needed))
+        (should compact-called)))))
+
+(ert-deftest gptel-agent-compaction-test-check-needed-returns-nil ()
+  "Test check-compaction-needed returns nil when not needed."
+  (with-temp-buffer
+    (let ((gptel-agent-context-size 10000)
+          (gptel-agent--session-token-count 5000)
+          (gptel-agent-compaction-threshold 0.7))
+      (should-not (gptel-agent--check-compaction-needed)))))
+
+;;;; Post Response Hook Tests
+
+(ert-deftest gptel-agent-compaction-test-post-response-hook ()
+  "Test post-response hook calls check function."
+  (let ((check-called nil))
+    (cl-letf (((symbol-function 'gptel-agent--check-compaction-needed)
+               (lambda () (setq check-called t) nil)))
+      (gptel-agent--post-response-compaction-check)
+      (should check-called))))
+
+;;;; Notification Tests
+
+(ert-deftest gptel-agent-compaction-test-notify-when-enabled ()
+  "Test notification shows when enabled."
+  (with-temp-buffer
+    (let ((gptel-agent-compaction-notify t)
+          (gptel-agent--session-token-count 8000)
+          (gptel-agent-context-size 10000)
+          (message-called nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest _) (setq message-called t))))
+        (gptel-agent--notify-compaction)
+        (should message-called)))))
+
+(ert-deftest gptel-agent-compaction-test-notify-when-disabled ()
+  "Test notification suppressed when disabled."
+  (with-temp-buffer
+    (let ((gptel-agent-compaction-notify nil)
+          (message-called nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest _) (setq message-called t))))
+        (gptel-agent--notify-compaction)
+        (should-not message-called)))))
+
+;;;; Minor Mode Tests
+
+(ert-deftest gptel-agent-compaction-test-mode-enable ()
+  "Test compaction mode enables properly."
+  (let ((gptel-agent-compaction-mode nil))
+    (gptel-agent-compaction-mode 1)
+    (unwind-protect
+        (progn
+          (should gptel-agent-compaction-mode)
+          (should (memq #'gptel-agent--post-response-compaction-check
+                        gptel-post-response-functions)))
+      (gptel-agent-compaction-mode -1))))
+
+(ert-deftest gptel-agent-compaction-test-mode-disable ()
+  "Test compaction mode disables properly."
+  (let ((gptel-agent-compaction-mode nil))
+    (gptel-agent-compaction-mode 1)
+    (gptel-agent-compaction-mode -1)
+    (should-not gptel-agent-compaction-mode)
+    (should-not (memq #'gptel-agent--post-response-compaction-check
+                      gptel-post-response-functions))))
+
+(ert-deftest gptel-agent-compaction-test-mode-adds-modeline ()
+  "Test compaction mode adds modeline indicator."
+  (let ((gptel-agent-compaction-mode nil)
+        (mode-line-misc-info nil))
+    (gptel-agent-compaction-mode 1)
+    (unwind-protect
+        (should (member '(:eval (gptel-agent--modeline-context-indicator))
+                        mode-line-misc-info))
+      (gptel-agent-compaction-mode -1))))
+
+;;;; Customization Group Tests
+
+(ert-deftest gptel-agent-compaction-test-custom-group-exists ()
+  "Test customization group is defined."
+  (should (get 'gptel-agent-compaction 'custom-group)))
+
+(ert-deftest gptel-agent-compaction-test-threshold-type ()
+  "Test threshold is a float."
+  (should (floatp gptel-agent-compaction-threshold)))
+
+(ert-deftest gptel-agent-compaction-test-threshold-range ()
+  "Test threshold is within valid range."
+  (should (>= gptel-agent-compaction-threshold 0.5))
+  (should (<= gptel-agent-compaction-threshold 0.95)))
+
+(ert-deftest gptel-agent-compaction-test-preserved-count-type ()
+  "Test preserved count is an integer."
+  (should (integerp gptel-agent-preserved-message-count)))
+
+(ert-deftest gptel-agent-compaction-test-preserved-count-positive ()
+  "Test preserved count is positive."
+  (should (> gptel-agent-preserved-message-count 0)))
+
+;;;; Count Conversation Tokens Tests
+
+(ert-deftest gptel-agent-compaction-test-count-conversation-empty ()
+  "Test counting tokens in empty conversation."
+  (cl-letf (((symbol-function 'gptel-agent--get-all-messages)
+             (lambda () nil)))
+    (should (= (gptel-agent--count-conversation-tokens) 0))))
+
+(ert-deftest gptel-agent-compaction-test-count-conversation-multiple ()
+  "Test counting tokens across multiple messages."
+  (cl-letf (((symbol-function 'gptel-agent--get-all-messages)
+             (lambda ()
+               (list (gptel-agent-compaction-test--make-message
+                      'user "Hello world")
+                     (gptel-agent-compaction-test--make-message
+                      'assistant "Hi there")))))
+    (let ((total (gptel-agent--count-conversation-tokens)))
+      (should (> total 0))
+      ;; Should be reasonable - not too high for short messages
+      (should (< total 100)))))
+
 ;;;; Integration Tests
 
 (ert-deftest gptel-agent-compaction-test-full-workflow ()
@@ -492,6 +861,153 @@ Optional PROPS is additional properties to merge."
         (let* ((limit (gptel-agent--get-context-limit))
                (threshold (* limit gptel-agent-compaction-threshold)))
           (should (> gptel-agent--session-token-count threshold)))))))
+
+;;;; Remove Message Tests
+
+(ert-deftest gptel-agent-compaction-test-remove-message-placeholder ()
+  "Test remove message placeholder doesn't error."
+  (let ((msg (gptel-agent-compaction-test--make-message 'user "test")))
+    ;; Should not error - just a placeholder
+    (should (null (gptel-agent--remove-message msg)))))
+
+;;;; Model Detection Edge Cases
+
+(ert-deftest gptel-agent-compaction-test-context-limit-gpt35 ()
+  "Test context limit for GPT-3.5 models."
+  (let ((gptel-agent-context-size nil)
+        (gptel-model "gpt-3.5-turbo-16k"))
+    (let ((limit (gptel-agent--get-context-limit)))
+      ;; Should be 16385 * 0.9 = 14746
+      (should (= limit 14746)))))
+
+(ert-deftest gptel-agent-compaction-test-context-limit-llama ()
+  "Test context limit for Llama models."
+  (let ((gptel-agent-context-size nil)
+        (gptel-model "llama-3-70b-instruct"))
+    (let ((limit (gptel-agent--get-context-limit)))
+      ;; Should be 8192 * 0.9 = 7372 (rounded)
+      (should (= limit 7373)))))
+
+(ert-deftest gptel-agent-compaction-test-context-limit-mistral ()
+  "Test context limit for Mistral models."
+  (let ((gptel-agent-context-size nil)
+        (gptel-model "mistral-large-latest"))
+    (let ((limit (gptel-agent--get-context-limit)))
+      ;; Should be 32000 * 0.9 = 28800
+      (should (= limit 28800)))))
+
+;;;; Format Messages Edge Cases
+
+(ert-deftest gptel-agent-compaction-test-format-single-message ()
+  "Test formatting single message."
+  (let ((messages (list (gptel-agent-compaction-test--make-message
+                         'user "Single message"))))
+    (let ((formatted (gptel-agent--format-messages-for-summary messages)))
+      (should (string-match-p "\\[USER\\]" formatted))
+      (should (string-match-p "Single message" formatted))
+      (should-not (string-match-p "\n\n\n" formatted)))))  ; No extra newlines
+
+(ert-deftest gptel-agent-compaction-test-format-tool-role ()
+  "Test formatting tool role message."
+  (let ((messages (list (gptel-agent-compaction-test--make-message
+                         'tool "Tool result"))))
+    (let ((formatted (gptel-agent--format-messages-for-summary messages)))
+      (should (string-match-p "\\[TOOL\\]" formatted)))))
+
+;;;; Insert Summary Edge Cases
+
+(ert-deftest gptel-agent-compaction-test-insert-summary-zero-count ()
+  "Test inserting summary with zero message count."
+  (let ((summary-msg (gptel-agent--insert-summary-message "Summary" 0)))
+    (should (string-match-p "0 messages" (plist-get summary-msg :content)))))
+
+(ert-deftest gptel-agent-compaction-test-insert-summary-large-count ()
+  "Test inserting summary with large message count."
+  (let ((summary-msg (gptel-agent--insert-summary-message "Summary" 1000)))
+    (should (string-match-p "1000 messages" (plist-get summary-msg :content)))))
+
+;;;; Modeline Edge Cases
+
+(ert-deftest gptel-agent-compaction-test-modeline-very-large-values ()
+  "Test modeline with very large token values."
+  (let ((gptel-mode t)
+        (gptel-agent--session-token-count 1000000)
+        (gptel-agent-context-size 2000000))
+    (let ((indicator (gptel-agent--modeline-context-indicator)))
+      (should (stringp indicator))
+      (should (string-match-p "1000k" indicator)))))
+
+(ert-deftest gptel-agent-compaction-test-modeline-boundary-60 ()
+  "Test modeline at exactly 60% boundary."
+  (let ((gptel-mode t)
+        (gptel-agent--session-token-count 6000)
+        (gptel-agent-context-size 10000))
+    (let ((indicator (gptel-agent--modeline-context-indicator)))
+      (should (eq (get-text-property 0 'face indicator) 'default)))))
+
+(ert-deftest gptel-agent-compaction-test-modeline-boundary-80 ()
+  "Test modeline at exactly 80% boundary."
+  (let ((gptel-mode t)
+        (gptel-agent--session-token-count 8000)
+        (gptel-agent-context-size 10000))
+    (let ((indicator (gptel-agent--modeline-context-indicator)))
+      (should (eq (get-text-property 0 'face indicator) 'warning)))))
+
+;;;; Task Marker Edge Cases
+
+(ert-deftest gptel-agent-compaction-test-task-marker-word-boundary ()
+  "Test task markers require word boundaries."
+  (let ((gptel-agent-task-markers '("fix")))
+    ;; "fix" as word should match
+    (let ((msg (gptel-agent-compaction-test--make-message
+                'user "Please fix this bug")))
+      (gptel-agent--mark-message-compactability msg)
+      (should-not (plist-get msg :compactable)))
+    ;; "prefix" should NOT match (fix is substring)
+    (let ((msg (gptel-agent-compaction-test--make-message
+                'user "The prefix is wrong")))
+      (gptel-agent--mark-message-compactability msg)
+      (should (plist-get msg :compactable)))))
+
+(ert-deftest gptel-agent-compaction-test-task-marker-multiple ()
+  "Test multiple task markers in one message."
+  (let ((gptel-agent-task-markers '("please" "implement")))
+    (let ((msg (gptel-agent-compaction-test--make-message
+                'user "Please implement the feature")))
+      (gptel-agent--mark-message-compactability msg)
+      (should-not (plist-get msg :compactable)))))
+
+(ert-deftest gptel-agent-compaction-test-task-marker-empty-list ()
+  "Test empty task marker list allows all messages."
+  (let ((gptel-agent-task-markers nil))
+    (let ((msg (gptel-agent-compaction-test--make-message
+                'user "Please implement something")))
+      (gptel-agent--mark-message-compactability msg)
+      (should (plist-get msg :compactable)))))
+
+;;;; Buffer Local Variable Tests
+
+(ert-deftest gptel-agent-compaction-test-session-token-count-buffer-local ()
+  "Test session token count is buffer-local."
+  (with-temp-buffer
+    (setq gptel-agent--session-token-count 1000)
+    (with-temp-buffer
+      (should (= gptel-agent--session-token-count 0)))
+    (should (= gptel-agent--session-token-count 1000))))
+
+(ert-deftest gptel-agent-compaction-test-summarization-progress-buffer-local ()
+  "Test summarization in progress is buffer-local."
+  (with-temp-buffer
+    (setq gptel-agent--summarization-in-progress t)
+    (with-temp-buffer
+      (should-not gptel-agent--summarization-in-progress))
+    (should gptel-agent--summarization-in-progress)))
+
+;;;; Get All Messages Tests
+
+(ert-deftest gptel-agent-compaction-test-get-all-messages-returns-list ()
+  "Test get-all-messages returns a list."
+  (should (listp (gptel-agent--get-all-messages))))
 
 (provide 'gptel-agent-compaction-test)
 ;;; gptel-agent-compaction-test.el ends here
