@@ -174,7 +174,8 @@ than the ring length, returns all entries."
            (result nil))
       (dotimes (i count)
         (push (ring-ref gptel-agent--recent-tool-calls i) result))
-      result)))
+      ;; ring-ref 0 is most recent, so reversing gives most recent first
+      (nreverse result))))
 
 (defun gptel-agent--clear-tool-history ()
   "Reset the tool call tracking ring buffer."
@@ -266,40 +267,58 @@ Returns non-nil if similarity is >= THRESHOLD (0.0-1.0)."
 (defun gptel-agent--detect-identical-sequence ()
   "Detect sequences of identical tool calls.
 
-Returns plist with :type 'identical, :pattern, :count, or nil."
-  (let ((calls (gptel-agent--get-recent-calls gptel-agent-doom-loop-threshold)))
-    (when (>= (length calls) gptel-agent-doom-loop-threshold)
-      (let ((first-call (car calls))
+Returns plist with :type 'identical, :pattern, :count, or nil.
+Counts all consecutive identical calls from the most recent one."
+  ;; First check if threshold is met using minimum calls
+  (let ((threshold-calls (gptel-agent--get-recent-calls gptel-agent-doom-loop-threshold)))
+    (when (>= (length threshold-calls) gptel-agent-doom-loop-threshold)
+      (let ((first-call (car threshold-calls))
             (all-identical t))
-        (dolist (call (cdr calls))
+        ;; Check if threshold calls are all identical
+        (dolist (call (cdr threshold-calls))
           (unless (gptel-agent--calls-identical-p first-call call)
             (setq all-identical nil)))
         (when all-identical
-          (list :type 'identical
-                :pattern (format "Identical call to '%s' with args: %S"
-                                 (plist-get first-call :tool)
-                                 (plist-get first-call :args))
-                :count (length calls)))))))
+          ;; Now count ALL consecutive identical calls from the buffer
+          (let* ((all-calls (gptel-agent--get-recent-calls))
+                 (count 0))
+            (cl-loop for call in all-calls
+                     while (gptel-agent--calls-identical-p first-call call)
+                     do (cl-incf count))
+            (list :type 'identical
+                  :pattern (format "Identical call to '%s' with args: %S"
+                                   (plist-get first-call :tool)
+                                   (plist-get first-call :args))
+                  :count count)))))))
 
 (defun gptel-agent--detect-similar-sequence ()
   "Detect sequences of similar (but not identical) tool calls.
 
-Returns plist with :type 'similar, :pattern, :count, or nil."
-  (let ((calls (gptel-agent--get-recent-calls gptel-agent-doom-loop-threshold)))
-    (when (>= (length calls) gptel-agent-doom-loop-threshold)
-      (let ((first-call (car calls))
+Returns plist with :type 'similar, :pattern, :count, or nil.
+Counts all consecutive similar calls from the most recent one."
+  (let ((threshold-calls (gptel-agent--get-recent-calls gptel-agent-doom-loop-threshold)))
+    (when (>= (length threshold-calls) gptel-agent-doom-loop-threshold)
+      (let ((first-call (car threshold-calls))
             (all-similar t))
-        (dolist (call (cdr calls))
+        (dolist (call (cdr threshold-calls))
           (unless (or (gptel-agent--calls-identical-p first-call call)
                       (gptel-agent--calls-similar-p
                        first-call call gptel-agent-doom-loop-similarity))
             (setq all-similar nil)))
         (when all-similar
-          (list :type 'similar
-                :pattern (format "Similar calls to '%s' (threshold: %.2f)"
-                                 (plist-get first-call :tool)
-                                 gptel-agent-doom-loop-similarity)
-                :count (length calls)))))))
+          ;; Now count ALL consecutive similar calls from the buffer
+          (let* ((all-calls (gptel-agent--get-recent-calls))
+                 (count 0))
+            (cl-loop for call in all-calls
+                     while (or (gptel-agent--calls-identical-p first-call call)
+                               (gptel-agent--calls-similar-p
+                                first-call call gptel-agent-doom-loop-similarity))
+                     do (cl-incf count))
+            (list :type 'similar
+                  :pattern (format "Similar calls to '%s' (threshold: %.2f)"
+                                   (plist-get first-call :tool)
+                                   gptel-agent-doom-loop-similarity)
+                  :count count)))))))
 
 (defun gptel-agent--detect-alternating-pattern ()
   "Detect A->B->A->B alternating pattern.
@@ -371,16 +390,23 @@ Returns a float between 0.0 (no confidence) and 1.0 (certain)."
   (let ((loop-info (gptel-agent--detect-doom-loop)))
     (if (not loop-info)
         0.0
-      (let ((base-score (pcase (plist-get loop-info :type)
-                          ('identical 1.0)
-                          ('similar 0.9)
-                          ('alternating 0.85)
-                          ('oscillating 0.8)
-                          (_ 0.5)))
+      (let ((type-base (pcase (plist-get loop-info :type)
+                         ('identical 0.8)
+                         ('similar 0.7)
+                         ('alternating 0.65)
+                         ('oscillating 0.6)
+                         (_ 0.5)))
             (count (plist-get loop-info :count))
             (threshold gptel-agent-doom-loop-threshold))
-        ;; Increase confidence with repetition count
-        (min 1.0 (* base-score (/ (float count) threshold)))))))
+        ;; Score increases with count beyond threshold, asymptotically approaching 1.0
+        ;; count-factor is >= 1 when threshold is met
+        (let* ((count-factor (/ (float count) threshold))
+               ;; Linear bonus for exceeding threshold, capped
+               ;; Each extra repetition beyond threshold adds ~0.02 to the score
+               (extra-reps (max 0 (- count threshold)))
+               (bonus (* 0.02 extra-reps))
+               (score (+ type-base bonus)))
+          (min 1.0 score))))))
 
 ;;;; Token Estimation
 
@@ -803,19 +829,46 @@ Returns non-nil if PATH is inside the project boundary."
 (defun gptel-agent--path-matches-glob-p (path pattern)
   "Check if PATH matches glob PATTERN.
 
-Supports * for any characters and ** for recursive directories."
-  (let* ((pattern (expand-file-name pattern))
-         ;; Convert glob to regex
-         (regex (concat "^"
-                        (replace-regexp-in-string
-                         "\\*\\*" "\\\\(.+/\\\\)?"
-                         (replace-regexp-in-string
-                          "\\*" "[^/]*"
-                          (replace-regexp-in-string
-                           "\\?" "."
-                           (regexp-quote pattern))))
-                        "$")))
-    (string-match-p regex (gptel-agent--normalize-path path))))
+Supports * for any characters, ? for single character, and ** for recursive directories."
+  (let* ((pattern-expanded (expand-file-name pattern))
+         ;; First escape the pattern
+         (quoted (regexp-quote pattern-expanded))
+         ;; Replace escaped **/ (which is now \\*\\*/) with placeholder
+         ;; This handles the common case of **/ meaning "any directories"
+         (with-double-star-slash (replace-regexp-in-string
+                                  (regexp-quote "\\*\\*/")
+                                  "\000DOUBLE_STAR_SLASH\000"
+                                  quoted))
+         ;; Replace remaining escaped ** with placeholder
+         (with-double-star (replace-regexp-in-string
+                            (regexp-quote "\\*\\*")
+                            "\000DOUBLE_STAR\000"
+                            with-double-star-slash))
+         ;; Replace escaped * (which is now \\*) with [^/]* (matches anything except /)
+         (with-single-star (replace-regexp-in-string
+                            (regexp-quote "\\*")
+                            "[^/]*"
+                            with-double-star))
+         ;; Replace escaped ? (which is now \\?) with [^/] (matches any single non-slash char)
+         (with-question (replace-regexp-in-string
+                         (regexp-quote "\\?")
+                         "[^/]"
+                         with-single-star))
+         ;; Replace double-star-slash placeholder: matches any path or no path
+         (with-dss-replaced (replace-regexp-in-string
+                             "\000DOUBLE_STAR_SLASH\000"
+                             "\\(.+/\\)?"
+                             with-question
+                             nil t))
+         ;; Replace double-star placeholder: matches any characters including /
+         (regex (replace-regexp-in-string
+                 "\000DOUBLE_STAR\000"
+                 ".*"
+                 with-dss-replaced
+                 nil t))
+         ;; Anchor the pattern
+         (anchored-regex (concat "^" regex "$")))
+    (string-match-p anchored-regex (gptel-agent--normalize-path path))))
 
 (defun gptel-agent--path-in-whitelist-p (path)
   "Check if PATH is in the whitelist.
@@ -850,10 +903,10 @@ Returns:
   (let* ((normalized (gptel-agent--normalize-path path))
          (within-boundary (gptel-agent--path-within-boundary-p normalized))
          (in-whitelist (gptel-agent--path-in-whitelist-p normalized))
-         (policy (pcase operation
-                   ((or 'read) gptel-agent-external-read-policy)
-                   ((or 'write 'edit 'execute) gptel-agent-external-write-policy)
-                   (_ gptel-agent-external-write-policy))))
+         (policy (cond
+                  ((eq operation 'read) gptel-agent-external-read-policy)
+                  ((memq operation '(write edit execute)) gptel-agent-external-write-policy)
+                  (t gptel-agent-external-write-policy))))
 
     (cond
      ;; Within project boundary - always allow
@@ -863,10 +916,10 @@ Returns:
      (in-whitelist 'allow-with-warning)
 
      ;; Apply policy
-     (t (pcase policy
-          ('allow 'allow-with-warning)
-          ('ask 'ask)
-          ('deny 'deny))))))
+     (t (cond
+         ((eq policy 'allow) 'allow-with-warning)
+         ((eq policy 'ask) 'ask)
+         ((eq policy 'deny) 'deny))))))
 
 ;;;; Visual Warning System
 
@@ -896,12 +949,13 @@ Returns a list of potential file paths found in the command."
   (let ((paths nil))
     ;; Common patterns for file operations
     (dolist (pattern '(
-                       ;; cat, head, tail, less, more
-                       "\\<\\(cat\\|head\\|tail\\|less\\|more\\)\\s-+\\([^ |;&<>]+\\)"
+                       ;; cat, head, tail, less, more - handle options like -n 10, -f
+                       ;; Options may have arguments (-n 10) so use general option pattern
+                       "\\<\\(cat\\|head\\|tail\\|less\\|more\\)\\s-+\\(?:-[a-zA-Z]+\\s-*[0-9]*\\s-+\\)*\\([^ |;&<>]+\\)"
                        ;; echo with redirection
                        ">+\\s-*\\([^ |;&]+\\)"
                        ;; cp, mv - extract both source and dest
-                       "\\<\\(cp\\|mv\\)\\s-+\\([^ ]+\\)\\s-+\\([^ ]+\\)"
+                       "\\<\\(cp\\|mv\\)\\s-+\\(?:-[a-zA-Z]+\\s-+\\)?\\([^ ]+\\)\\s-+\\([^ ]+\\)"
                        ;; rm
                        "\\<rm\\s-+\\(?:-[rf]+\\s-+\\)?\\([^ |;&]+\\)"
                        ;; touch, mkdir
