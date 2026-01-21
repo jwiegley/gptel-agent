@@ -156,7 +156,9 @@ These tools can read and search but don't modify files or state.")
 
 (defun gptel-agent--get-all-tools ()
   "Return list of all available tool names."
-  (when (boundp 'gptel-tools)
+  ;; Note: We use `bound-and-true-p' to check if gptel-tools is set.
+  ;; This handles both globally bound and dynamically let-bound cases.
+  (when (bound-and-true-p gptel-tools)
     (mapcar (lambda (tool)
               (if (symbolp tool)
                   (symbol-name tool)
@@ -171,7 +173,7 @@ TOOL-SPEC can be:
 - `read-only': Return only read-only tools
 - A list of tool names to filter to"
   (let ((all-tools (or gptel-agent--original-tools
-                       (when (boundp 'gptel-tools) gptel-tools))))
+                       (bound-and-true-p gptel-tools))))
     (pcase tool-spec
       ('all all-tools)
       ('read-only
@@ -198,11 +200,9 @@ TOOL-SPEC can be:
   "Apply tool restrictions according to TOOL-SPEC."
   ;; Save original tools on first call
   (unless gptel-agent--original-tools
-    (when (boundp 'gptel-tools)
-      (setq gptel-agent--original-tools gptel-tools)))
+    (setq gptel-agent--original-tools (bound-and-true-p gptel-tools)))
   ;; Apply filter
-  (when (boundp 'gptel-tools)
-    (setq gptel-tools (gptel-agent--filter-tools tool-spec))))
+  (setq gptel-tools (gptel-agent--filter-tools tool-spec)))
 
 ;;;; Mode Management
 
@@ -394,8 +394,7 @@ Enables:
         (unless gptel-agent--current-mode
           (setq gptel-agent--current-mode 'agent))
         ;; Save original tools
-        (when (boundp 'gptel-tools)
-          (setq gptel-agent--original-tools gptel-tools))
+        (setq gptel-agent--original-tools (bound-and-true-p gptel-tools))
         ;; Update mode line if configured
         (gptel-agent--update-mode-line)
         ;; Run hook functions
@@ -405,8 +404,7 @@ Enables:
     (setq gptel-agent--mode-index 0)
     ;; Restore original tools
     (when gptel-agent--original-tools
-      (when (boundp 'gptel-tools)
-        (setq gptel-tools gptel-agent--original-tools))
+      (setq gptel-tools gptel-agent--original-tools)
       (setq gptel-agent--original-tools nil))))
 
 ;;;; Status Display
