@@ -276,13 +276,13 @@ Signals an error if:
                     (error "Invalid frontmatter key: %s" key)))
                 (setq current-plist (cddr current-plist))))
 
-            (if (not templates)
-                parsed-yaml
-              ;; Apply template substitutions in place, then extract body text
-              (gptel-agent--expand-templates body-start templates)
-              ;; Extract the expanded body text
-              (let ((expanded-body (buffer-substring-no-properties body-start (point-max))))
-                (plist-put parsed-yaml :system expanded-body)))))))))
+            ;; Apply template substitutions if provided
+            (when templates
+              (gptel-agent--expand-templates body-start templates))
+
+            ;; Always extract the body text and add as :system
+            (let ((body-text (buffer-substring-no-properties body-start (point-max))))
+              (plist-put parsed-yaml :system body-text))))))))
 
 (defun gptel-agent-parse-org-properties (file-path &optional validator templates)
   "Parse an Org file with properties in a :PROPERTIES: drawer.
