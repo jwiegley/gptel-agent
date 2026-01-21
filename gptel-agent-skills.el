@@ -277,7 +277,8 @@ Returns the validated skill plist."
   "Resolve dependencies for SKILL-NAMES.
 
 Returns a topologically sorted list of skill names including
-all dependencies.  Signals an error if circular dependencies detected."
+all dependencies.  Signals an error if circular dependencies detected
+or if a required skill is not found."
   (let ((visited (make-hash-table :test 'equal))
         (visiting (make-hash-table :test 'equal))
         (result nil))
@@ -289,11 +290,13 @@ all dependencies.  Signals an error if circular dependencies detected."
                     (error "Circular skill dependency detected: %s" name))
                    (t
                     (puthash name t visiting)
-                    (when-let* ((path (gptel-agent--resolve-skill-path name))
-                                (skill (gptel-agent--parse-skill-file path))
-                                (deps (plist-get skill :requires)))
-                      (dolist (dep deps)
-                        (visit dep)))
+                    (let ((path (gptel-agent--resolve-skill-path name)))
+                      (unless path
+                        (error "Skill not found: %s" name))
+                      (let* ((skill (gptel-agent--parse-skill-file path))
+                             (deps (plist-get skill :requires)))
+                        (dolist (dep deps)
+                          (visit dep))))
                     (remhash name visiting)
                     (puthash name t visited)
                     (push name result)))))
@@ -517,34 +520,37 @@ Source is either 'project or 'global."
 (defun gptel-agent-skills-status ()
   "Display current skill status for the buffer."
   (interactive)
-  (with-help-window "*Skill Status*"
-    (with-current-buffer standard-output
-      (insert (propertize "GPTel Agent Skills Status\n" 'face 'bold))
-      (insert (make-string 40 ?=) "\n\n")
+  ;; Capture buffer-local variables before switching to help window
+  (let ((skill-load-order gptel-agent--skill-load-order)
+        (active-skills gptel-agent--active-skills)
+        (restrictions (gptel-agent--compute-tool-restrictions))
+        (available (gptel-agent-available-skills)))
+    (with-help-window "*Skill Status*"
+      (with-current-buffer standard-output
+        (insert (propertize "GPTel Agent Skills Status\n" 'face 'bold))
+        (insert (make-string 40 ?=) "\n\n")
 
-      (insert (propertize "Active Skills:\n" 'face 'bold))
-      (if gptel-agent--skill-load-order
-          (dolist (name gptel-agent--skill-load-order)
-            (let ((skill (cl-find name gptel-agent--active-skills
-                                 :key (lambda (s) (plist-get s :name))
-                                 :test #'equal)))
-              (insert (format "  - %s" name))
-              (when-let ((desc (plist-get skill :description)))
-                (insert (format " (%s)" desc)))
-              (insert "\n")))
-        (insert "  (none)\n"))
+        (insert (propertize "Active Skills:\n" 'face 'bold))
+        (if skill-load-order
+            (dolist (name skill-load-order)
+              (let ((skill (cl-find name active-skills
+                                   :key (lambda (s) (plist-get s :name))
+                                   :test #'equal)))
+                (insert (format "  - %s" name))
+                (when-let ((desc (plist-get skill :description)))
+                  (insert (format " (%s)" desc)))
+                (insert "\n")))
+          (insert "  (none)\n"))
 
-      (insert "\n" (propertize "Tool Restrictions:\n" 'face 'bold))
-      (let ((restrictions (gptel-agent--compute-tool-restrictions)))
+        (insert "\n" (propertize "Tool Restrictions:\n" 'face 'bold))
         (if (and (null (car restrictions)) (null (cdr restrictions)))
             (insert "  (no restrictions)\n")
           (when (car restrictions)
             (insert "  Allowed: " (mapconcat #'identity (car restrictions) ", ") "\n"))
           (when (cdr restrictions)
-            (insert "  Denied: " (mapconcat #'identity (cdr restrictions) ", ") "\n"))))
+            (insert "  Denied: " (mapconcat #'identity (cdr restrictions) ", ") "\n")))
 
-      (insert "\n" (propertize "Available Skills:\n" 'face 'bold))
-      (let ((available (gptel-agent-available-skills)))
+        (insert "\n" (propertize "Available Skills:\n" 'face 'bold))
         (if available
             (dolist (entry available)
               (insert (format "  - %s [%s]\n" (car entry) (cdr entry))))
