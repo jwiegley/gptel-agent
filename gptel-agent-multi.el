@@ -293,7 +293,7 @@ the \"*gptel-agent:*\" prefix format."
     (message "Session renamed to: %s" new-name)))
 
 ;;;###autoload
-(defun gptel-agent-list-sessions ()
+(cl-defun gptel-agent-list-sessions ()
   "Display list of active agent sessions with status.
 
 Shows session name, project, model, and idle status for all

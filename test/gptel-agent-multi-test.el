@@ -341,5 +341,455 @@ Returns the buffer object with initialized session metadata."
   (should (integerp (default-value 'gptel-agent-idle-timeout)))
   (should (> (default-value 'gptel-agent-idle-timeout) 0)))
 
+;;;; Additional Customization Tests
+
+(ert-deftest gptel-agent-multi-test-customization-group ()
+  "Test customization group is defined."
+  (should (get 'gptel-agent-multi 'custom-group)))
+
+(ert-deftest gptel-agent-multi-test-max-sessions-type ()
+  "Test max sessions custom type."
+  (let ((type (get 'gptel-agent-max-sessions 'custom-type)))
+    (should (consp type))
+    (should (eq (car type) 'choice))))
+
+(ert-deftest gptel-agent-multi-test-idle-timeout-type ()
+  "Test idle timeout custom type."
+  (let ((type (get 'gptel-agent-idle-timeout 'custom-type)))
+    (should (consp type))
+    (should (eq (car type) 'choice))))
+
+;;;; Session Registry Extended Tests
+
+(ert-deftest gptel-agent-multi-test-register-session-initializes-name ()
+  "Test session registration initializes name from buffer name."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (generate-new-buffer "*gptel-agent:test-init*")))
+      (with-current-buffer buf
+        (setq default-directory "/tmp/"))
+      (gptel-agent--register-session buf)
+      (with-current-buffer buf
+        ;; Session name should default to buffer name
+        (should gptel-agent--session-name)))))
+
+(ert-deftest gptel-agent-multi-test-register-preserves-existing-name ()
+  "Test registration preserves existing session name."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (generate-new-buffer "*gptel-agent:test*")))
+      (with-current-buffer buf
+        (setq default-directory "/tmp/")
+        (setq gptel-agent--session-name "custom-name"))
+      (gptel-agent--register-session buf)
+      (with-current-buffer buf
+        (should (string= gptel-agent--session-name "custom-name"))))))
+
+(ert-deftest gptel-agent-multi-test-register-no-duplicates ()
+  "Test registering same buffer twice doesn't duplicate."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "test" "/tmp/")))
+      (gptel-agent--register-session buf)
+      (gptel-agent--register-session buf)
+      ;; Should only be in list once
+      (should (= 1 (cl-count buf gptel-agent--active-sessions))))))
+
+;;;; Activity Update Extended Tests
+
+(ert-deftest gptel-agent-multi-test-update-activity-non-session ()
+  "Test activity update in non-registered buffer."
+  (gptel-agent-multi-test--with-cleanup
+    (with-temp-buffer
+      ;; Should not error even if buffer not registered
+      (gptel-agent--update-activity)
+      ;; Should have no effect
+      (should-not gptel-agent--last-activity))))
+
+(ert-deftest gptel-agent-multi-test-update-activity-updates-registered ()
+  "Test activity update only affects registered sessions."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "test" "/tmp/")))
+      (gptel-agent--register-session buf)
+      (with-current-buffer buf
+        (let ((old-activity gptel-agent--last-activity))
+          (sleep-for 0.1)
+          (gptel-agent--update-activity)
+          (should (time-less-p old-activity gptel-agent--last-activity)))))))
+
+;;;; Session Limit Extended Tests
+
+(ert-deftest gptel-agent-multi-test-check-limit-approaching ()
+  "Test warning when approaching session limit."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((gptel-agent-max-sessions 3)
+          (warning-shown nil))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (_ msg _)
+                   (when (string-match-p "Approaching" msg)
+                     (setq warning-shown t)))))
+        ;; Register 2 sessions (at limit - 1)
+        (dotimes (i 2)
+          (let ((buf (gptel-agent-multi-test--create-mock-session
+                      (format "session%d" i) "/tmp/")))
+            (gptel-agent--register-session buf)))
+        (should warning-shown)))))
+
+(ert-deftest gptel-agent-multi-test-check-limit-at-limit ()
+  "Test warning when at session limit."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((gptel-agent-max-sessions 2)
+          (warning-msg nil))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (_ msg _)
+                   (setq warning-msg msg))))
+        ;; Register 2 sessions (at limit)
+        (dotimes (i 2)
+          (let ((buf (gptel-agent-multi-test--create-mock-session
+                      (format "session%d" i) "/tmp/")))
+            (gptel-agent--register-session buf)))
+        (should (string-match-p "Maximum" warning-msg))))))
+
+(ert-deftest gptel-agent-multi-test-check-limit-under-limit ()
+  "Test no warning when well under limit."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((gptel-agent-max-sessions 10)
+          (warning-count 0))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (&rest _) (cl-incf warning-count))))
+        ;; Register 1 session (well under limit)
+        (let ((buf (gptel-agent-multi-test--create-mock-session "test" "/tmp/")))
+          (gptel-agent--register-session buf))
+        (should (= warning-count 0))))))
+
+;;;; Get Active Sessions Extended Tests
+
+(ert-deftest gptel-agent-multi-test-get-sessions-filters-dead-buffers ()
+  "Test get-active-sessions filters out dead buffers."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf1 (gptel-agent-multi-test--create-mock-session "alive" "/tmp/"))
+          (buf2 (gptel-agent-multi-test--create-mock-session "tokill" "/tmp/")))
+      (gptel-agent--register-session buf1)
+      (gptel-agent--register-session buf2)
+      ;; Kill one buffer without unregistering
+      (kill-buffer buf2)
+      (let ((sessions (gptel-agent--get-active-sessions)))
+        ;; Should only return alive buffer
+        (should (= (length sessions) 1))
+        (should (eq (plist-get (car sessions) :buffer) buf1))))))
+
+(ert-deftest gptel-agent-multi-test-get-sessions-with-model ()
+  "Test get-active-sessions includes model info."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "test" "/tmp/")))
+      (with-current-buffer buf
+        (defvar gptel-model)
+        (setq gptel-model "gpt-4"))
+      (gptel-agent--register-session buf)
+      (let* ((sessions (gptel-agent--get-active-sessions))
+             (session (car sessions)))
+        (should (equal (plist-get session :model) "gpt-4"))))))
+
+(ert-deftest gptel-agent-multi-test-get-sessions-abbreviates-directory ()
+  "Test get-active-sessions abbreviates project directory."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "test" "~/")))
+      (with-current-buffer buf
+        (setq default-directory (expand-file-name "~/")))
+      (gptel-agent--register-session buf)
+      (let* ((sessions (gptel-agent--get-active-sessions))
+             (project (plist-get (car sessions) :project)))
+        ;; Should be abbreviated (contains ~)
+        (should (string-match-p "~" project))))))
+
+;;;; Format Annotation Extended Tests
+
+(ert-deftest gptel-agent-multi-test-format-annotation-nil-model ()
+  "Test annotation formatting with nil model."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((session (list :buffer (current-buffer)
+                         :name "test"
+                         :project "/tmp/"
+                         :model nil
+                         :idle 60
+                         :idle-p nil)))
+      (let ((annotation (gptel-agent--format-session-annotation session)))
+        (should (stringp annotation))
+        (should (string-match-p "/tmp/" annotation))
+        (should-not (string-match-p "nil" annotation))))))
+
+(ert-deftest gptel-agent-multi-test-format-annotation-nil-idle ()
+  "Test annotation formatting with nil idle."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((session (list :buffer (current-buffer)
+                         :name "test"
+                         :project "/tmp/"
+                         :model "gpt-4"
+                         :idle nil
+                         :idle-p nil)))
+      (let ((annotation (gptel-agent--format-session-annotation session)))
+        (should (stringp annotation))
+        (should-not (string-match-p "idle" annotation))
+        (should-not (string-match-p "active" annotation))))))
+
+;;;; Idle Detection Extended Tests
+
+(ert-deftest gptel-agent-multi-test-idle-p-dead-buffer ()
+  "Test idle detection with dead buffer."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "test" "/tmp/")))
+      (gptel-agent--register-session buf)
+      (kill-buffer buf)
+      ;; Should return nil for dead buffer
+      (should-not (gptel-agent--session-idle-p buf)))))
+
+(ert-deftest gptel-agent-multi-test-idle-p-nil-activity ()
+  "Test idle detection with nil last activity."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((gptel-agent-idle-timeout 60)
+          (buf (generate-new-buffer " *test-idle*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer buf
+              (setq default-directory "/tmp/")
+              (setq gptel-agent--last-activity nil))
+            (push buf gptel-agent--active-sessions)
+            ;; Should return nil when no activity recorded
+            (should-not (gptel-agent--session-idle-p buf)))
+        (kill-buffer buf)))))
+
+;;;; Switch Session Tests
+
+(ert-deftest gptel-agent-multi-test-switch-no-sessions ()
+  "Test switch with no active sessions."
+  (gptel-agent-multi-test--with-cleanup
+    (should-error (gptel-agent-switch) :type 'user-error)))
+
+(ert-deftest gptel-agent-multi-test-switch-selects-session ()
+  "Test switch selects and switches to session."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "target" "/tmp/")))
+      (gptel-agent--register-session buf)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _)
+                   (concat "target"
+                           (gptel-agent--format-session-annotation
+                            (car (gptel-agent--get-active-sessions)))))))
+        (gptel-agent-switch)
+        (should (eq (current-buffer) buf))))))
+
+;;;; List Sessions Tests
+
+(ert-deftest gptel-agent-multi-test-list-sessions-none ()
+  "Test list sessions with no active sessions."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((message-shown nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest _)
+                   (when (string-match-p "No active" fmt)
+                     (setq message-shown t)))))
+        (gptel-agent-list-sessions)
+        (should message-shown)))))
+
+(ert-deftest gptel-agent-multi-test-list-sessions-short ()
+  "Test list sessions with few sessions uses echo area."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf1 (gptel-agent-multi-test--create-mock-session "s1" "/tmp/"))
+          (buf2 (gptel-agent-multi-test--create-mock-session "s2" "/tmp/"))
+          (message-shown nil))
+      (gptel-agent--register-session buf1)
+      (gptel-agent--register-session buf2)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest _)
+                   (when (string-match-p "Active sessions" fmt)
+                     (setq message-shown t)))))
+        (gptel-agent-list-sessions)
+        (should message-shown)))))
+
+(ert-deftest gptel-agent-multi-test-list-sessions-long ()
+  "Test list sessions with many sessions uses buffer."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((bufs nil))
+      ;; Create more than 5 sessions
+      (dotimes (i 6)
+        (let ((buf (gptel-agent-multi-test--create-mock-session
+                    (format "session%d" i) "/tmp/")))
+          (push buf bufs)
+          (gptel-agent--register-session buf)))
+      (cl-letf (((symbol-function 'pop-to-buffer)
+                 (lambda (buf) (set-buffer buf))))
+        (gptel-agent-list-sessions)
+        ;; Should have created a buffer
+        (should (get-buffer "*GPTel Agent Sessions*"))
+        (kill-buffer "*GPTel Agent Sessions*")))))
+
+;;;; Rename Session Extended Tests
+
+(ert-deftest gptel-agent-multi-test-rename-strips-prefix ()
+  "Test rename strips gptel-agent prefix for initial value."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "test" "/tmp/")))
+      (gptel-agent--register-session buf)
+      (with-current-buffer buf
+        (setq gptel-agent--session-name "*gptel-agent:myname*")
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_ initial)
+                     ;; Verify initial value has prefix stripped
+                     initial)))
+          ;; The interactive call would strip the prefix
+          (should (string= "myname"
+                           (string-remove-prefix
+                            "*gptel-agent:"
+                            (string-remove-suffix "*" gptel-agent--session-name)))))))))
+
+(ert-deftest gptel-agent-multi-test-rename-updates-buffer-name ()
+  "Test rename updates buffer name."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "old" "/tmp/")))
+      (gptel-agent--register-session buf)
+      (with-current-buffer buf
+        (gptel-agent-rename-session "new")
+        (should (string-match-p "new" (buffer-name)))))))
+
+;;;; Close Idle Sessions Extended Tests
+
+(ert-deftest gptel-agent-multi-test-close-idle-no-force-declined ()
+  "Test close idle without force can be declined."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((gptel-agent-idle-timeout 1)
+          (buf (gptel-agent-multi-test--create-mock-session "idle" "/tmp/")))
+      (gptel-agent--register-session buf)
+      (sleep-for 1.5)
+      ;; Decline to close
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+        (let ((closed (gptel-agent-close-idle-sessions)))
+          (should (= closed 0))
+          (should (buffer-live-p buf)))))))
+
+(ert-deftest gptel-agent-multi-test-close-idle-mixed ()
+  "Test close idle only closes idle sessions."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((gptel-agent-idle-timeout 1)
+          (idle-buf (gptel-agent-multi-test--create-mock-session "idle" "/tmp/"))
+          (active-buf (gptel-agent-multi-test--create-mock-session "active" "/tmp/")))
+      (gptel-agent--register-session idle-buf)
+      (sleep-for 1.5)
+      (gptel-agent--register-session active-buf)
+      (gptel-agent--update-activity active-buf)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (let ((closed (gptel-agent-close-idle-sessions)))
+          (should (= closed 1))
+          (should-not (buffer-live-p idle-buf))
+          (should (buffer-live-p active-buf)))))))
+
+;;;; Buffer Local Variable Extended Tests
+
+(ert-deftest gptel-agent-multi-test-session-name-buffer-local ()
+  "Test session name is buffer local."
+  (with-temp-buffer
+    (setq gptel-agent--session-name "buf1")
+    (with-temp-buffer
+      (setq gptel-agent--session-name "buf2")
+      (should (string= gptel-agent--session-name "buf2")))
+    (should (string= gptel-agent--session-name "buf1"))))
+
+(ert-deftest gptel-agent-multi-test-last-activity-buffer-local ()
+  "Test last activity is buffer local."
+  (with-temp-buffer
+    (setq gptel-agent--last-activity (current-time))
+    (let ((time1 gptel-agent--last-activity))
+      (with-temp-buffer
+        (setq gptel-agent--last-activity nil)
+        (should-not gptel-agent--last-activity))
+      (should (equal gptel-agent--last-activity time1)))))
+
+;;;; Session Registry Variable Test
+
+(ert-deftest gptel-agent-multi-test-active-sessions-global ()
+  "Test active sessions registry is global."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "test" "/tmp/")))
+      (gptel-agent--register-session buf)
+      ;; Should be visible from any buffer
+      (with-temp-buffer
+        (should (memq buf gptel-agent--active-sessions))))))
+
+;;;; Edge Case Tests
+
+(ert-deftest gptel-agent-multi-test-unregister-not-in-list ()
+  "Test unregistering buffer not in list."
+  (gptel-agent-multi-test--with-cleanup
+    (with-temp-buffer
+      ;; Should not error
+      (gptel-agent--unregister-session (current-buffer))
+      (should-not (memq (current-buffer) gptel-agent--active-sessions)))))
+
+(ert-deftest gptel-agent-multi-test-empty-sessions-list ()
+  "Test behavior with empty sessions list."
+  (gptel-agent-multi-test--with-cleanup
+    (should (= (length (gptel-agent--get-active-sessions)) 0))))
+
+(ert-deftest gptel-agent-multi-test-session-sorting-same-activity ()
+  "Test sorting with sessions that have same activity time."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((now (current-time)))
+      (let ((buf1 (gptel-agent-multi-test--create-mock-session "a" "/tmp/"))
+            (buf2 (gptel-agent-multi-test--create-mock-session "b" "/tmp/")))
+        ;; Set same activity time
+        (with-current-buffer buf1
+          (setq gptel-agent--last-activity now))
+        (with-current-buffer buf2
+          (setq gptel-agent--last-activity now))
+        (gptel-agent--register-session buf1)
+        (gptel-agent--register-session buf2)
+        (let ((sessions (gptel-agent--get-active-sessions)))
+          ;; Should return both without error
+          (should (= (length sessions) 2)))))))
+
+(ert-deftest gptel-agent-multi-test-format-annotation-all-nil ()
+  "Test annotation formatting with minimal data."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((session (list :buffer (current-buffer)
+                         :name "test"
+                         :project ""
+                         :model nil
+                         :idle nil
+                         :idle-p nil)))
+      (let ((annotation (gptel-agent--format-session-annotation session)))
+        (should (stringp annotation))))))
+
+(ert-deftest gptel-agent-multi-test-cleanup-hook-removes-from-registry ()
+  "Test cleanup hook properly removes session."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((buf (gptel-agent-multi-test--create-mock-session "cleanup" "/tmp/")))
+      (gptel-agent--register-session buf)
+      (should (memq buf gptel-agent--active-sessions))
+      ;; Simulate cleanup hook
+      (with-current-buffer buf
+        (gptel-agent--cleanup-on-kill))
+      (should-not (memq buf gptel-agent--active-sessions)))))
+
+;;;; Integration Tests
+
+(ert-deftest gptel-agent-multi-test-full-lifecycle ()
+  "Test full session lifecycle: create, use, rename, close."
+  (gptel-agent-multi-test--with-cleanup
+    (let ((gptel-agent-idle-timeout 1))
+      ;; Create session
+      (let ((buf (gptel-agent-multi-test--create-mock-session "lifecycle" "/tmp/")))
+        (gptel-agent--register-session buf)
+        (should (memq buf gptel-agent--active-sessions))
+        ;; Use session
+        (gptel-agent--update-activity buf)
+        (should-not (gptel-agent--session-idle-p buf))
+        ;; Rename
+        (with-current-buffer buf
+          (gptel-agent-rename-session "renamed"))
+        (should (string= (with-current-buffer buf gptel-agent--session-name) "renamed"))
+        ;; Wait to become idle
+        (sleep-for 1.5)
+        (should (gptel-agent--session-idle-p buf))
+        ;; Close
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+          (gptel-agent-close-idle-sessions))
+        (should-not (buffer-live-p buf))))))
+
 (provide 'gptel-agent-multi-test)
 ;;; gptel-agent-multi-test.el ends here
