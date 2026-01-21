@@ -126,17 +126,25 @@ Each entry is a plist with keys:
 (defun gptel-agent--locate-config (dir)
   "Find the permission config file starting from DIR.
 
-Searches upward through the directory hierarchy until finding
-`gptel-agent-permission-config-filename' or reaching the project root.
+First checks if DIR itself contains the config file. If not found,
+searches upward through the directory hierarchy using `project-current'
+to find the project root.
 
 Returns the full path to the config file if found, or nil otherwise."
-  (when-let* ((project (project-current nil dir))
-              (project-root (project-root project)))
-    (let ((config-path (expand-file-name
-                        gptel-agent-permission-config-filename
-                        project-root)))
-      (when (file-readable-p config-path)
-        config-path))))
+  ;; First check the directory itself
+  (let ((direct-path (expand-file-name
+                      gptel-agent-permission-config-filename
+                      dir)))
+    (if (file-readable-p direct-path)
+        direct-path
+      ;; Fall back to project root lookup
+      (when-let* ((project (project-current nil dir))
+                  (project-root (project-root project)))
+        (let ((config-path (expand-file-name
+                            gptel-agent-permission-config-filename
+                            project-root)))
+          (when (file-readable-p config-path)
+            config-path))))))
 
 ;;;; Config Loading and Parsing
 
@@ -219,8 +227,13 @@ Use this after modifying .gptel-agent.el files."
   (when-let* ((project (project-current))
               (project-root (project-root project)))
     (gptel-agent--invalidate-permission-cache project-root)
-    (if (gptel-agent--load-project-permissions project-root)
-        (message "Reloaded permissions for project: %s" project-root)
+    (if-let ((config (gptel-agent--load-project-permissions project-root)))
+        (progn
+          ;; Re-populate the cache with freshly loaded config
+          (gptel-agent--cache-permissions project-root
+                                          (plist-get config :permissions)
+                                          (plist-get config :config-path))
+          (message "Reloaded permissions for project: %s" project-root))
       (message "No permission config found for project: %s" project-root))))
 
 ;;;; Pattern Matching
@@ -270,10 +283,19 @@ formats as \"tool-name arg1 arg2 ...\"."
   "Check if TOOL-CALL string matches PATTERN using glob-style matching.
 
 TOOL-CALL is the formatted tool call string.
-PATTERN is a glob pattern (e.g., \"git *\", \"rm -rf *\").
+PATTERN is a glob pattern (e.g., \"git *\", \"rm -rf *\", \"file[0-9].txt\").
+
+Supports standard glob syntax:
+  * - matches any sequence of characters
+  ? - matches any single character
+  [abc] - matches any character in the set
+  [a-z] - matches any character in the range
+
+Matching is case-sensitive.
 
 Returns non-nil if the pattern matches."
-  (let ((regexp (wildcard-to-regexp pattern)))
+  (let ((regexp (wildcard-to-regexp pattern))
+        (case-fold-search nil))
     (string-match-p regexp tool-call)))
 
 ;;;; Permission Resolution
@@ -385,11 +407,11 @@ TOOL-NAME should be a string or symbol matching the tool's name."
                      (car arg-values)
                    arg-values))
            (permission (gptel-agent--check-permission tool-name args)))
-      (pcase permission
-        ('allow nil)                    ; No confirmation needed
-        ('ask t)                        ; Show confirmation UI
-        ('deny
-         (error "Permission denied for tool `%s'" tool-name))))))
+      (cond
+       ((eq permission 'allow) nil)      ; No confirmation needed
+       ((eq permission 'ask) t)          ; Show confirmation UI
+       ((eq permission 'deny)
+        (error "Permission denied for tool `%s'" tool-name))))))
 
 (defun gptel-agent-permission-enforcer (tool-name)
   "Create a permission enforcement wrapper for TOOL-NAME.
@@ -409,9 +431,9 @@ Usage in tool registration:
    ...)"
   (lambda (original-fn &rest args)
     (let ((permission (gptel-agent--check-permission tool-name args)))
-      (pcase permission
-        ('deny (error "Permission denied for tool `%s'" tool-name))
-        (_ (apply original-fn args))))))
+      (if (eq permission 'deny)
+          (error "Permission denied for tool `%s'" tool-name)
+        (apply original-fn args)))))
 
 (defun gptel-agent-wrap-tool-confirm (tool-spec)
   "Wrap TOOL-SPEC's confirm function to include permission checking.
@@ -430,14 +452,14 @@ Returns the modified TOOL-SPEC."
                                   (car arg-values)
                                 arg-values))
                         (permission (gptel-agent--check-permission tool-name args)))
-                   (pcase permission
-                     ('allow nil)
-                     ('deny (error "Permission denied for tool `%s'" tool-name))
-                     ('ask
-                      ;; Defer to original confirm behavior
-                      (if (functionp original-confirm)
-                          (apply original-confirm arg-values)
-                        original-confirm)))))))
+                   (cond
+                    ((eq permission 'allow) nil)
+                    ((eq permission 'deny) (error "Permission denied for tool `%s'" tool-name))
+                    ((eq permission 'ask)
+                     ;; Defer to original confirm behavior
+                     (if (functionp original-confirm)
+                         (apply original-confirm arg-values)
+                       original-confirm)))))))
   tool-spec)
 
 (defun gptel-agent-permission-confirm (tool-name args)
@@ -450,14 +472,14 @@ ARGS is the argument list/plist for the tool call.
 
 Returns non-nil if execution should proceed, nil otherwise."
   (let ((permission (gptel-agent--check-permission tool-name args)))
-    (pcase permission
-      ('allow t)
-      ('deny
-       (message "Permission denied for tool `%s'" tool-name)
-       nil)
-      ('ask
-       (let ((tool-call (gptel-agent--build-tool-call-string tool-name args)))
-         (yes-or-no-p (format "Allow tool call: %s? " tool-call)))))))
+    (cond
+     ((eq permission 'allow) t)
+     ((eq permission 'deny)
+      (message "Permission denied for tool `%s'" tool-name)
+      nil)
+     ((eq permission 'ask)
+      (let ((tool-call (gptel-agent--build-tool-call-string tool-name args)))
+        (yes-or-no-p (format "Allow tool call: %s? " tool-call)))))))
 
 (provide 'gptel-agent-permissions)
 ;;; gptel-agent-permissions.el ends here

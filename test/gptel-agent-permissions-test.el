@@ -129,9 +129,12 @@ Returns the absolute path to the directory."
   ;; Multiple wildcards
   (should (gptel-agent--permission-matches-p "git commit -m test" "git * -m *"))
 
-  ;; Pattern with special regex characters (should be escaped)
+  ;; Pattern with dot (dot is literal in glob patterns)
   (should (gptel-agent--permission-matches-p "file.txt" "file.txt"))
-  (should (gptel-agent--permission-matches-p "file[1].txt" "file[1].txt"))
+
+  ;; Character class patterns - [1] is a character class matching digit 1
+  (should (gptel-agent--permission-matches-p "file1.txt" "file[1].txt"))
+  (should-not (gptel-agent--permission-matches-p "file2.txt" "file[1].txt"))
 
   ;; Case sensitivity
   (should-not (gptel-agent--permission-matches-p "Git Status" "git *"))
@@ -558,6 +561,268 @@ Returns the absolute path to the directory."
                 'allow))
     (should (eq (gptel-agent--resolve-tool-permission 'delete '("file") permissions)
                 'deny))))
+
+;;; Config Location Tests
+
+(ert-deftest gptel-agent-permissions-test-locate-config-found ()
+  "Test locating config file when it exists."
+  (gptel-agent-permissions-test--with-cleanup
+    (let* ((dir (gptel-agent-permissions-test--make-temp-project))
+           (config-form '(gptel-agent-project-config
+                          :permissions ((* . allow))))
+           (expected-path (expand-file-name ".gptel-agent.el" dir)))
+      (gptel-agent-permissions-test--write-config dir config-form)
+      ;; Use cl-letf to mock project-current and project-root
+      (cl-letf (((symbol-function 'project-current)
+                 (lambda (&optional _maybe-prompt _directory) dir))
+                ((symbol-function 'project-root)
+                 (lambda (_project) dir)))
+        (let ((found (gptel-agent--locate-config dir)))
+          (should found)
+          (should (string-equal found expected-path)))))))
+
+(ert-deftest gptel-agent-permissions-test-locate-config-not-found ()
+  "Test locating config file when it doesn't exist."
+  (gptel-agent-permissions-test--with-cleanup
+    (let ((dir (gptel-agent-permissions-test--make-temp-project)))
+      ;; Don't create config file
+      (cl-letf (((symbol-function 'project-current)
+                 (lambda (&optional _maybe-prompt _directory) dir))
+                ((symbol-function 'project-root)
+                 (lambda (_project) dir)))
+        (should-not (gptel-agent--locate-config dir))))))
+
+(ert-deftest gptel-agent-permissions-test-locate-config-no-project ()
+  "Test locating config file when no project is detected."
+  (cl-letf (((symbol-function 'project-current)
+             (lambda (&optional _maybe-prompt _directory) nil)))
+    (should-not (gptel-agent--locate-config "/nonexistent"))))
+
+;;; Reload Permissions Tests
+
+(ert-deftest gptel-agent-permissions-test-reload-permissions ()
+  "Test interactive permission reload."
+  (gptel-agent-permissions-test--with-cleanup
+    (let* ((dir (gptel-agent-permissions-test--make-temp-project))
+           (config-form '(gptel-agent-project-config
+                          :permissions ((* . allow)))))
+      (gptel-agent-permissions-test--write-config dir config-form)
+
+      ;; Pre-populate cache
+      (let ((loaded (gptel-agent--load-project-permissions dir)))
+        (gptel-agent--cache-permissions dir
+                                        (plist-get loaded :permissions)
+                                        (plist-get loaded :config-path)))
+      (should (gptel-agent--get-cached-permissions dir))
+
+      ;; Mock project functions and call reload
+      (cl-letf (((symbol-function 'project-current)
+                 (lambda (&optional _maybe-prompt _directory) dir))
+                ((symbol-function 'project-root)
+                 (lambda (_project) dir)))
+        (gptel-agent-reload-permissions))
+
+      ;; Cache should be repopulated (not nil after reload)
+      (should (gptel-agent--get-cached-permissions dir)))))
+
+(ert-deftest gptel-agent-permissions-test-reload-no-project ()
+  "Test reload permissions when no project context."
+  (cl-letf (((symbol-function 'project-current)
+             (lambda (&optional _maybe-prompt _directory) nil)))
+    ;; Should not error
+    (gptel-agent-reload-permissions)))
+
+;;; Permission Enforcer Tests
+
+(ert-deftest gptel-agent-permissions-test-permission-enforcer-allow ()
+  "Test permission enforcer allows execution."
+  (let ((gptel-agent-default-permissions '((* . allow)))
+        (original-fn (lambda (&rest args) (list 'executed args)))
+        (enforcer (gptel-agent-permission-enforcer "test-tool")))
+    (let ((result (funcall enforcer original-fn "arg1" "arg2")))
+      (should (equal result '(executed ("arg1" "arg2")))))))
+
+(ert-deftest gptel-agent-permissions-test-permission-enforcer-deny ()
+  "Test permission enforcer blocks execution."
+  (let ((gptel-agent-default-permissions '((* . deny)))
+        (original-fn (lambda (&rest args) (list 'executed args)))
+        (enforcer (gptel-agent-permission-enforcer "test-tool")))
+    (should-error (funcall enforcer original-fn "arg1")
+                  :type 'error)))
+
+(ert-deftest gptel-agent-permissions-test-permission-enforcer-ask ()
+  "Test permission enforcer with ask allows through."
+  (let ((gptel-agent-default-permissions '((* . ask)))
+        (original-fn (lambda (&rest args) (list 'executed args)))
+        (enforcer (gptel-agent-permission-enforcer "test-tool")))
+    ;; Ask permission still allows execution (it's the confirm function that prompts)
+    (let ((result (funcall enforcer original-fn "arg1")))
+      (should (equal result '(executed ("arg1")))))))
+
+;;; Wrap Tool Confirm Tests
+
+(ert-deftest gptel-agent-permissions-test-wrap-tool-confirm-basic ()
+  "Test wrapping a tool spec with permission checking."
+  (let ((gptel-agent-default-permissions '((* . allow)))
+        (tool-spec (list :name "TestTool"
+                         :confirm (lambda (&rest _) t)
+                         :function #'identity)))
+    (let ((wrapped (gptel-agent-wrap-tool-confirm tool-spec)))
+      (should wrapped)
+      (should (functionp (plist-get wrapped :confirm)))
+      ;; With allow permission, should return nil (no confirmation)
+      (should-not (funcall (plist-get wrapped :confirm) "arg")))))
+
+(ert-deftest gptel-agent-permissions-test-wrap-tool-confirm-deny ()
+  "Test wrapped tool confirm signals error on deny."
+  (let ((gptel-agent-default-permissions '((testtool . deny)))
+        (tool-spec (list :name "TestTool"
+                         :confirm (lambda (&rest _) t)
+                         :function #'identity)))
+    (let ((wrapped (gptel-agent-wrap-tool-confirm tool-spec)))
+      (should-error (funcall (plist-get wrapped :confirm) "arg")
+                    :type 'error))))
+
+(ert-deftest gptel-agent-permissions-test-wrap-tool-confirm-ask-defers ()
+  "Test wrapped tool confirm defers to original on ask."
+  (let* ((gptel-agent-default-permissions '((testtool . ask)))
+         (original-called nil)
+         (tool-spec (list :name "TestTool"
+                          :confirm (lambda (&rest _)
+                                     (setq original-called t)
+                                     'original-result)
+                          :function #'identity)))
+    (let ((wrapped (gptel-agent-wrap-tool-confirm tool-spec)))
+      (let ((result (funcall (plist-get wrapped :confirm) "arg")))
+        (should original-called)
+        (should (eq result 'original-result))))))
+
+(ert-deftest gptel-agent-permissions-test-wrap-tool-confirm-nil-name ()
+  "Test wrap-tool-confirm handles nil name gracefully."
+  (let ((tool-spec (list :confirm (lambda (&rest _) t)
+                         :function #'identity)))
+    (let ((result (gptel-agent-wrap-tool-confirm tool-spec)))
+      ;; Should return original spec unchanged when name is nil
+      (should (eq result tool-spec)))))
+
+;;; Additional Edge Cases
+
+(ert-deftest gptel-agent-permissions-test-empty-pattern-list ()
+  "Test resolution with empty pattern list for tool."
+  (let ((permissions '((bash . ()))))
+    ;; No patterns means no match, should fall back
+    (should (eq (gptel-agent--resolve-tool-permission 'bash '(:command "ls") permissions)
+                'ask))))
+
+(ert-deftest gptel-agent-permissions-test-nested-plist-args ()
+  "Test tool call string building with nested plist args."
+  (should (string-equal
+           (gptel-agent--build-tool-call-string "edit" '(:file "/path" :content "test" :mode "append"))
+           "edit /path test append")))
+
+(ert-deftest gptel-agent-permissions-test-symbol-in-args ()
+  "Test tool call string building with symbols in args."
+  (should (string-equal
+           (gptel-agent--build-tool-call-string "test" '(foo bar baz))
+           "test foo bar baz")))
+
+(ert-deftest gptel-agent-permissions-test-bash-with-cmd-key ()
+  "Test bash tool call string extraction with :cmd key."
+  (should (string-equal
+           (gptel-agent--build-tool-call-string 'bash '(:cmd "echo hello"))
+           "echo hello")))
+
+(ert-deftest gptel-agent-permissions-test-bash-with-direct-string ()
+  "Test bash tool call string extraction with direct string arg."
+  (should (string-equal
+           (gptel-agent--build-tool-call-string 'bash '("pwd"))
+           "pwd")))
+
+(ert-deftest gptel-agent-permissions-test-glob-question-mark ()
+  "Test glob pattern with question mark wildcard."
+  (should (gptel-agent--permission-matches-p "git" "gi?"))
+  (should-not (gptel-agent--permission-matches-p "gitt" "gi?")))
+
+(ert-deftest gptel-agent-permissions-test-glob-character-class ()
+  "Test glob pattern with character class."
+  (should (gptel-agent--permission-matches-p "file1.txt" "file[0-9].txt"))
+  (should-not (gptel-agent--permission-matches-p "filea.txt" "file[0-9].txt")))
+
+(ert-deftest gptel-agent-permissions-test-config-custom-filename ()
+  "Test config location with custom filename."
+  (gptel-agent-permissions-test--with-cleanup
+    (let* ((dir (gptel-agent-permissions-test--make-temp-project))
+           (gptel-agent-permission-config-filename ".custom-config.el")
+           (config-path (expand-file-name ".custom-config.el" dir)))
+      (with-temp-file config-path
+        (prin1 '(gptel-agent-project-config :permissions ((* . allow)))
+               (current-buffer)))
+      (cl-letf (((symbol-function 'project-current)
+                 (lambda (&optional _maybe-prompt _directory) dir))
+                ((symbol-function 'project-root)
+                 (lambda (_project) dir)))
+        (let ((found (gptel-agent--locate-config dir)))
+          (should found)
+          (should (string-equal found config-path)))))))
+
+(ert-deftest gptel-agent-permissions-test-permission-confirm-ask-yes ()
+  "Test permission confirm with ask decision and user approving."
+  (let ((gptel-agent-default-permissions '((* . ask))))
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+      (should (gptel-agent-permission-confirm "read" '("/tmp/file"))))))
+
+(ert-deftest gptel-agent-permissions-test-permission-confirm-ask-no ()
+  "Test permission confirm with ask decision and user denying."
+  (let ((gptel-agent-default-permissions '((* . ask))))
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) nil)))
+      (should-not (gptel-agent-permission-confirm "read" '("/tmp/file"))))))
+
+(ert-deftest gptel-agent-permissions-test-default-permissions-ask ()
+  "Test default value of gptel-agent-default-permissions."
+  (should (equal (default-value 'gptel-agent-default-permissions)
+                 '((* . ask)))))
+
+(ert-deftest gptel-agent-permissions-test-customization-group ()
+  "Test that customization group is defined."
+  (should (get 'gptel-agent-permissions 'group-documentation)))
+
+(ert-deftest gptel-agent-permissions-test-config-filename-default ()
+  "Test default config filename."
+  (should (string-equal (default-value 'gptel-agent-permission-config-filename)
+                        ".gptel-agent.el")))
+
+(ert-deftest gptel-agent-permissions-test-cache-hash-table-exists ()
+  "Test that permission cache is initialized."
+  (should (hash-table-p gptel-agent--permission-cache)))
+
+(ert-deftest gptel-agent-permissions-test-pattern-with-asterisk-middle ()
+  "Test pattern matching with asterisk in middle of pattern."
+  (should (gptel-agent--permission-matches-p "git commit -m 'message'" "git * -m *"))
+  (should (gptel-agent--permission-matches-p "npm run build" "npm * build")))
+
+(ert-deftest gptel-agent-permissions-test-resolve-pattern-only-wildcard-fallback ()
+  "Test pattern resolution uses wildcard fallback in tool rules."
+  (let ((permissions '((bash . ((pattern "git *" . allow)
+                                (* . deny))))))
+    ;; Non-matching command should use (* . deny) fallback in bash rules
+    (should (eq (gptel-agent--resolve-tool-permission 'bash '(:command "ls") permissions)
+                'deny))))
+
+(ert-deftest gptel-agent-permissions-test-resolve-pattern-no-wildcard-fallback ()
+  "Test pattern resolution without wildcard fallback."
+  (let ((permissions '((bash . ((pattern "git *" . allow)))
+                       (* . deny))))
+    ;; Non-matching should fall back to universal (* . deny)
+    (should (eq (gptel-agent--resolve-tool-permission 'bash '(:command "ls") permissions)
+                'deny))))
+
+(ert-deftest gptel-agent-permissions-test-make-permission-confirm-single-list-arg ()
+  "Test permission confirm with single list as argument."
+  (let ((gptel-agent-default-permissions '((bash . ((pattern "git *" . allow)
+                                                     (* . ask))))))
+    (let ((confirm-fn (gptel-agent--make-permission-confirm "bash")))
+      ;; When called with a single list argument
+      (should-not (funcall confirm-fn '(:command "git status"))))))
 
 (provide 'gptel-agent-permissions-test)
 ;;; gptel-agent-permissions-test.el ends here
