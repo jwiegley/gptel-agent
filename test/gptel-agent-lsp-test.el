@@ -250,5 +250,483 @@ Returns the tool struct or nil if not found."
       (when (file-exists-p test-file)
         (delete-file test-file)))))
 
+;;;; Additional Customization Tests
+
+(ert-deftest gptel-agent-lsp-test-customization-group ()
+  "Test customization group is defined."
+  (should (get 'gptel-agent-lsp 'custom-group)))
+
+(ert-deftest gptel-agent-lsp-test-enable-type ()
+  "Test enable custom type."
+  (let ((type (get 'gptel-agent-lsp-enable 'custom-type)))
+    (should (eq type 'boolean))))
+
+(ert-deftest gptel-agent-lsp-test-max-results-type ()
+  "Test max-results custom type."
+  (let ((type (get 'gptel-agent-lsp-max-results 'custom-type)))
+    (should (eq type 'integer))))
+
+(ert-deftest gptel-agent-lsp-test-hover-max-length-type ()
+  "Test hover-max-length custom type."
+  (let ((type (get 'gptel-agent-lsp-hover-max-length 'custom-type)))
+    (should (eq type 'integer))))
+
+(ert-deftest gptel-agent-lsp-test-context-lines-type ()
+  "Test context-lines custom type."
+  (let ((type (get 'gptel-agent-lsp-context-lines 'custom-type)))
+    (should (eq type 'integer))))
+
+;;;; Get Buffer Helper Tests
+
+(ert-deftest gptel-agent-lsp-test-get-buffer-existing ()
+  "Test get-buffer for existing file."
+  (let ((test-file (make-temp-file "lsp-test" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert ";; test"))
+          (let ((buf (gptel-agent-lsp--get-buffer test-file)))
+            (should buf)
+            (should (buffer-live-p buf))
+            (kill-buffer buf)))
+      (when (file-exists-p test-file)
+        (delete-file test-file)))))
+
+(ert-deftest gptel-agent-lsp-test-get-buffer-nonexistent ()
+  "Test get-buffer for nonexistent file."
+  (should (null (gptel-agent-lsp--get-buffer "/nonexistent/file.el"))))
+
+(ert-deftest gptel-agent-lsp-test-get-buffer-already-open ()
+  "Test get-buffer returns existing buffer."
+  (let ((test-file (make-temp-file "lsp-test" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert ";; test"))
+          (let* ((buf1 (find-file-noselect test-file))
+                 (buf2 (gptel-agent-lsp--get-buffer test-file)))
+            (should (eq buf1 buf2))
+            (kill-buffer buf1)))
+      (when (file-exists-p test-file)
+        (delete-file test-file)))))
+
+;;;; Position Conversion Extended Tests
+
+(ert-deftest gptel-agent-lsp-test-position-both-nil ()
+  "Test position conversion with both values nil."
+  (let ((pos (gptel-agent-lsp--position nil nil)))
+    (should (= (plist-get pos :line) 0))
+    (should (= (plist-get pos :character) 0))))
+
+(ert-deftest gptel-agent-lsp-test-position-large-values ()
+  "Test position conversion with large values."
+  (let ((pos (gptel-agent-lsp--position 1000 500)))
+    (should (= (plist-get pos :line) 999))
+    (should (= (plist-get pos :character) 500))))
+
+;;;; Truncation Extended Tests
+
+(ert-deftest gptel-agent-lsp-test-truncate-empty-string ()
+  "Test truncation of empty string."
+  (should (equal (gptel-agent-lsp--truncate-string "" 100) "")))
+
+(ert-deftest gptel-agent-lsp-test-truncate-very-short-max ()
+  "Test truncation with very short max length."
+  (let ((result (gptel-agent-lsp--truncate-string "hello" 4)))
+    (should (= (length result) 4))
+    (should (string-suffix-p "..." result))))
+
+;;;; Location Formatting Extended Tests
+
+(ert-deftest gptel-agent-lsp-test-format-location-with-context ()
+  "Test formatting location shows context lines."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-context-lines 1)
+         (location (list :uri (concat "file://" test-file)
+                         :range (list :start (list :line 1 :character 0)))))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert ";; Line 1\n;; Line 2\n;; Line 3\n"))
+          (let ((formatted (gptel-agent-lsp--format-location location)))
+            ;; Should include context
+            (should (string-match-p "Line 1" formatted))
+            (should (string-match-p "Line 2" formatted))
+            (should (string-match-p "Line 3" formatted))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+(ert-deftest gptel-agent-lsp-test-format-location-highlights-target ()
+  "Test formatting location highlights target line."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-context-lines 0)
+         (location (list :uri (concat "file://" test-file)
+                         :range (list :start (list :line 0 :character 5)))))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (let ((formatted (gptel-agent-lsp--format-location location)))
+            ;; Should have > marker for target line
+            (should (string-match-p ">" formatted))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+;;;; Implementations Operation Tests
+
+(ert-deftest gptel-agent-lsp-test-implementations-disabled ()
+  "Test implementations operation when LSP is disabled."
+  (let ((gptel-agent-lsp-enable nil))
+    (should (string-match-p "disabled"
+                            (gptel-agent-lsp--implementations "test.el")))))
+
+(ert-deftest gptel-agent-lsp-test-implementations-no-server ()
+  "Test implementations operation with no LSP server."
+  (let ((gptel-agent-lsp-enable t))
+    (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+              ((symbol-function 'eglot-current-server) (lambda () nil)))
+      (should (string-match-p "No LSP server"
+                              (gptel-agent-lsp--implementations "test.el"))))))
+
+(ert-deftest gptel-agent-lsp-test-implementations-file-not-found ()
+  "Test implementations operation when file doesn't exist."
+  (let ((gptel-agent-lsp-enable t))
+    (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+              ((symbol-function 'eglot-current-server) (lambda () t)))
+      (should (string-match-p "not found"
+                              (gptel-agent-lsp--implementations "/nonexistent/file.el"))))))
+
+;;;; Operations with Symbol Search Tests
+
+(ert-deftest gptel-agent-lsp-test-definitions-with-symbol ()
+  "Test definitions operation with symbol name search."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun my-test-function () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _) nil)))
+            ;; Should not error and should search for symbol
+            (let ((result (gptel-agent-lsp--definitions test-file "my-test-function")))
+              (should (stringp result)))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+;;;; Mock LSP Response Tests
+
+(ert-deftest gptel-agent-lsp-test-definitions-with-response ()
+  "Test definitions operation with mock LSP response."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _)
+                       (list :uri (concat "file://" test-file)
+                             :range (list :start (list :line 0 :character 0))))))
+            (let ((result (gptel-agent-lsp--definitions test-file nil 1 0)))
+              (should (stringp result))
+              (should (string-match-p "defun" result)))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+(ert-deftest gptel-agent-lsp-test-references-with-vector-response ()
+  "Test references operation with vector response."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)\n(test)\n(test)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _)
+                       ;; Return vector (array) of locations
+                       (vector
+                        (list :uri (concat "file://" test-file)
+                              :range (list :start (list :line 1 :character 0)))
+                        (list :uri (concat "file://" test-file)
+                              :range (list :start (list :line 2 :character 0)))))))
+            (let ((result (gptel-agent-lsp--references test-file nil 1 0)))
+              (should (stringp result))
+              ;; Should format multiple locations
+              (should (string-match-p "----" result)))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+(ert-deftest gptel-agent-lsp-test-hover-with-string-contents ()
+  "Test hover operation with string contents."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _)
+                       (list :contents "This is documentation"))))
+            (let ((result (gptel-agent-lsp--hover test-file nil 1 0)))
+              (should (string= result "This is documentation")))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+(ert-deftest gptel-agent-lsp-test-hover-with-value-contents ()
+  "Test hover operation with :value contents."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _)
+                       (list :contents (list :value "Markdown documentation"
+                                             :kind "markdown")))))
+            (let ((result (gptel-agent-lsp--hover test-file nil 1 0)))
+              (should (string= result "Markdown documentation")))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+(ert-deftest gptel-agent-lsp-test-symbols-with-response ()
+  "Test symbols operation with mock response."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentIdentifier)
+                     (lambda () '(:uri "file://test")))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _)
+                       (vector
+                        (list :name "test"
+                              :kind 12
+                              :range (list :start (list :line 0 :character 0)))))))
+            (let ((result (gptel-agent-lsp--symbols test-file)))
+              (should (stringp result))
+              (should (string-match-p "test" result))
+              (should (string-match-p "kind: 12" result)))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+;;;; Max Results Limiting Tests
+
+(ert-deftest gptel-agent-lsp-test-definitions-limits-results ()
+  "Test definitions limits results to max."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t)
+         (gptel-agent-lsp-max-results 2))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _)
+                       ;; Return more results than max
+                       (vector
+                        (list :uri (concat "file://" test-file)
+                              :range (list :start (list :line 0 :character 0)))
+                        (list :uri (concat "file://" test-file)
+                              :range (list :start (list :line 0 :character 0)))
+                        (list :uri (concat "file://" test-file)
+                              :range (list :start (list :line 0 :character 0)))
+                        (list :uri (concat "file://" test-file)
+                              :range (list :start (list :line 0 :character 0)))))))
+            (let ((result (gptel-agent-lsp--definitions test-file nil 1 0)))
+              ;; Should have only 2 separators (max-results = 2 means 1 separator)
+              (should (stringp result))
+              ;; Count separators
+              (let ((count 0)
+                    (start 0))
+                (while (string-match "----" result start)
+                  (setq count (1+ count)
+                        start (match-end 0)))
+                (should (<= count (1- gptel-agent-lsp-max-results)))))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+;;;; Tool Description Tests
+
+(ert-deftest gptel-agent-lsp-test-tool-description ()
+  "Test tool has comprehensive description."
+  (let* ((tool (gptel-agent-lsp-test--get-tool))
+         (desc (gptel-tool-description tool)))
+    (should (stringp desc))
+    (should (string-match-p "definitions" desc))
+    (should (string-match-p "references" desc))
+    (should (string-match-p "hover" desc))
+    (should (string-match-p "symbols" desc))
+    (should (string-match-p "implementations" desc))))
+
+(ert-deftest gptel-agent-lsp-test-tool-arg-types ()
+  "Test tool argument types."
+  (let* ((tool (gptel-agent-lsp-test--get-tool))
+         (args (gptel-tool-args tool)))
+    ;; operation is string with enum
+    ;; Note: gptel converts type symbols to strings internally
+    (let ((op-arg (nth 0 args)))
+      (should (equal (plist-get op-arg :type) "string"))
+      (should (plist-get op-arg :enum)))
+    ;; file is string
+    (let ((file-arg (nth 1 args)))
+      (should (equal (plist-get file-arg :type) "string")))
+    ;; line/column are integers and optional
+    (let ((line-arg (nth 3 args)))
+      (should (equal (plist-get line-arg :type) "integer"))
+      (should (plist-get line-arg :optional)))))
+
+;;;; Availability Check Extended Tests
+
+(ert-deftest gptel-agent-lsp-test-check-available ()
+  "Test availability check returns nil when all conditions met."
+  (let ((gptel-agent-lsp-enable t))
+    (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+              ((symbol-function 'eglot-current-server) (lambda () 'mock-server)))
+      (should (null (gptel-agent-lsp--check-availability))))))
+
+;;;; Error Message Tests
+
+(ert-deftest gptel-agent-lsp-test-definitions-error-suggests-grep ()
+  "Test definitions error message suggests Grep."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _) (error "LSP error"))))
+            (let ((result (gptel-agent-lsp--definitions test-file "my-symbol" 1 0)))
+              (should (string-match-p "Grep" result))
+              (should (string-match-p "my-symbol" result)))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+;;;; No Results Tests
+
+(ert-deftest gptel-agent-lsp-test-definitions-no-results ()
+  "Test definitions with no results."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _) nil)))
+            (let ((result (gptel-agent-lsp--definitions test-file nil 1 0)))
+              (should (string-match-p "No definitions found" result)))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+(ert-deftest gptel-agent-lsp-test-references-no-results ()
+  "Test references with no results."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _) nil)))
+            (let ((result (gptel-agent-lsp--references test-file nil 1 0)))
+              (should (string-match-p "No references found" result)))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+(ert-deftest gptel-agent-lsp-test-hover-no-results ()
+  "Test hover with no results."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _) nil)))
+            (let ((result (gptel-agent-lsp--hover test-file nil 1 0)))
+              (should (string-match-p "No hover information" result)))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
+(ert-deftest gptel-agent-lsp-test-implementations-no-results ()
+  "Test implementations with no results."
+  (let* ((test-file (make-temp-file "lsp-test" nil ".el"))
+         (gptel-agent-lsp-enable t))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file
+            (insert "(defun test () nil)"))
+          (cl-letf (((symbol-function 'featurep) (lambda (_) t))
+                    ((symbol-function 'eglot-current-server) (lambda () 'mock))
+                    ((symbol-function 'eglot--TextDocumentPositionParams)
+                     (lambda () '(:textDocument (:uri "file://test"))))
+                    ((symbol-function 'eglot--request)
+                     (lambda (&rest _) nil)))
+            (let ((result (gptel-agent-lsp--implementations test-file nil 1 0)))
+              (should (string-match-p "No implementations found" result)))))
+      (delete-file test-file)
+      (when-let ((buf (find-buffer-visiting test-file)))
+        (kill-buffer buf)))))
+
 (provide 'gptel-agent-lsp-test)
 ;;; gptel-agent-lsp-test.el ends here
