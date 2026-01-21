@@ -362,5 +362,431 @@
   (should (facep 'gptel-agent-stats-cost-face))
   (should (facep 'gptel-agent-stats-warning-face)))
 
+;;;; Time Period Helpers Tests
+
+(ert-deftest gptel-agent-stats-test-day-start ()
+  "Test day start calculation."
+  ;; Create a time that's mid-day
+  (let* ((test-time (encode-time (list 30 15 14 10 6 2025)))  ; 2025-06-10 14:15:30
+         (day-start (gptel-agent-stats--day-start test-time))
+         (decoded (decode-time day-start)))
+    ;; Should be midnight of same day
+    (should (= (nth 0 decoded) 0))   ; seconds
+    (should (= (nth 1 decoded) 0))   ; minutes
+    (should (= (nth 2 decoded) 0))   ; hours
+    (should (= (nth 3 decoded) 10))  ; day
+    (should (= (nth 4 decoded) 6))   ; month
+    (should (= (nth 5 decoded) 2025)))) ; year
+
+(ert-deftest gptel-agent-stats-test-month-start ()
+  "Test month start calculation."
+  ;; Create a time that's mid-month
+  (let* ((test-time (encode-time (list 30 15 14 15 6 2025)))  ; 2025-06-15 14:15:30
+         (month-start (gptel-agent-stats--month-start test-time))
+         (decoded (decode-time month-start)))
+    ;; Should be first of month at midnight
+    (should (= (nth 0 decoded) 0))   ; seconds
+    (should (= (nth 1 decoded) 0))   ; minutes
+    (should (= (nth 2 decoded) 0))   ; hours
+    (should (= (nth 3 decoded) 1))   ; day (first)
+    (should (= (nth 4 decoded) 6))   ; month
+    (should (= (nth 5 decoded) 2025)))) ; year
+
+;;;; Budget Period Expiration Tests
+
+(ert-deftest gptel-agent-stats-test-budget-period-expired-daily ()
+  "Test daily budget period expiration."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-period 'daily))
+      (gptel-agent-stats--init-budget-period)
+      ;; Same day - not expired
+      (should-not (gptel-agent-stats--budget-period-expired-p))
+      ;; Set start to yesterday
+      (let ((yesterday (time-subtract (current-time) (* 24 60 60))))
+        (plist-put gptel-agent--budget-spent :start yesterday)
+        ;; Should be expired
+        (should (gptel-agent-stats--budget-period-expired-p))))))
+
+(ert-deftest gptel-agent-stats-test-budget-period-expired-monthly ()
+  "Test monthly budget period expiration."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-period 'monthly))
+      (gptel-agent-stats--init-budget-period)
+      ;; Same month - not expired
+      (should-not (gptel-agent-stats--budget-period-expired-p))
+      ;; Set start to last month (subtract 32 days to be safe)
+      (let ((last-month (time-subtract (current-time) (* 32 24 60 60))))
+        (plist-put gptel-agent--budget-spent :start last-month)
+        ;; Should be expired (unless we're in early January)
+        (let ((decoded (decode-time (current-time))))
+          (when (> (nth 3 decoded) 1)  ; Skip test on 1st of month
+            (should (gptel-agent-stats--budget-period-expired-p))))))))
+
+(ert-deftest gptel-agent-stats-test-budget-period-expired-nil ()
+  "Test budget period expiration when no budget set."
+  (gptel-agent-stats-test--with-clean-state
+    (should-not (gptel-agent-stats--budget-period-expired-p))))
+
+;;;; Budget Check Edge Cases
+
+(ert-deftest gptel-agent-stats-test-budget-check-80-percent ()
+  "Test budget warning at 80% threshold."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-limit 10.00)
+          (gptel-agent-budget-action 'warn)
+          (message-called nil))
+      (gptel-agent-stats--init-budget-period)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest _) (setq message-called t))))
+        (gptel-agent-stats--check-budget 8.00)  ; 80%
+        (should message-called)))))
+
+(ert-deftest gptel-agent-stats-test-budget-check-90-percent ()
+  "Test budget warning at 90% threshold."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-limit 10.00)
+          (gptel-agent-budget-action 'warn)
+          (message-called nil))
+      (gptel-agent-stats--init-budget-period)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest _) (setq message-called t))))
+        (gptel-agent-stats--check-budget 9.00)  ; 90%
+        (should message-called)))))
+
+(ert-deftest gptel-agent-stats-test-budget-check-warn-exceeded ()
+  "Test budget warning when exceeded."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-limit 10.00)
+          (gptel-agent-budget-action 'warn)
+          (message-called nil))
+      (gptel-agent-stats--init-budget-period)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest _) (setq message-called t))))
+        (gptel-agent-stats--check-budget 15.00)  ; 150%
+        (should message-called)))))
+
+(ert-deftest gptel-agent-stats-test-budget-check-confirm-accepted ()
+  "Test budget confirm action when accepted."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-limit 10.00)
+          (gptel-agent-budget-action 'confirm))
+      (gptel-agent-stats--init-budget-period)
+      (cl-letf (((symbol-function 'yes-or-no-p)
+                 (lambda (&rest _) t)))  ; Accept
+        ;; Should not error
+        (gptel-agent-stats--check-budget 15.00)
+        (should (= (plist-get gptel-agent--budget-spent :amount) 15.00))))))
+
+(ert-deftest gptel-agent-stats-test-budget-check-confirm-rejected ()
+  "Test budget confirm action when rejected."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-limit 10.00)
+          (gptel-agent-budget-action 'confirm))
+      (gptel-agent-stats--init-budget-period)
+      (cl-letf (((symbol-function 'yes-or-no-p)
+                 (lambda (&rest _) nil)))  ; Reject
+        (should-error (gptel-agent-stats--check-budget 15.00)
+                      :type 'user-error)))))
+
+(ert-deftest gptel-agent-stats-test-budget-check-no-limit ()
+  "Test budget check when no limit set."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-limit nil))
+      ;; Should not error
+      (gptel-agent-stats--check-budget 1000.00))))
+
+(ert-deftest gptel-agent-stats-test-budget-resets-on-period-expiry ()
+  "Test budget resets when period expires."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-limit 10.00)
+          (gptel-agent-budget-period 'daily)
+          (gptel-agent-budget-action 'warn))
+      (gptel-agent-stats--init-budget-period)
+      (plist-put gptel-agent--budget-spent :amount 5.00)
+      ;; Set start to yesterday
+      (let ((yesterday (time-subtract (current-time) (* 24 60 60))))
+        (plist-put gptel-agent--budget-spent :start yesterday))
+      ;; Should reinitialize with new check
+      (gptel-agent-stats--check-budget 1.00)
+      ;; Amount should be 1.00, not 6.00
+      (should (= (plist-get gptel-agent--budget-spent :amount) 1.00)))))
+
+;;;; Session Persistence Tests
+
+(ert-deftest gptel-agent-stats-test-save-with-session ()
+  "Test statistics save for session persistence."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-stats-persist t))
+      (gptel-agent-stats--init-session)
+      (plist-put gptel-agent--session-stats :input-tokens 100)
+      (plist-put gptel-agent--session-stats :output-tokens 200)
+      (plist-put gptel-agent--session-stats :session-cost 0.05)
+      (push '(:timestamp nil :input-tokens 50 :output-tokens 75 :cost 0.02)
+            (plist-get gptel-agent--session-stats :responses))
+      (let ((saved (gptel-agent-stats--save-with-session)))
+        (should saved)
+        (should (= (plist-get saved :input-tokens) 100))
+        (should (= (plist-get saved :output-tokens) 200))
+        (should (= (plist-get saved :session-cost) 0.05))
+        (should (= (plist-get saved :response-count) 1))))))
+
+(ert-deftest gptel-agent-stats-test-save-with-session-persist-disabled ()
+  "Test statistics save when persistence disabled."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-stats-persist nil))
+      (gptel-agent-stats--init-session)
+      (should (null (gptel-agent-stats--save-with-session))))))
+
+(ert-deftest gptel-agent-stats-test-save-with-session-no-stats ()
+  "Test statistics save with no stats."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-stats-persist t))
+      (should (null (gptel-agent-stats--save-with-session))))))
+
+(ert-deftest gptel-agent-stats-test-load-from-session ()
+  "Test loading statistics from session."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-stats-persist t)
+          (saved-stats (list :input-tokens 500
+                            :output-tokens 1000
+                            :session-cost 0.25)))
+      (gptel-agent-stats--load-from-session saved-stats)
+      (should gptel-agent--session-stats)
+      (should (= (plist-get gptel-agent--session-stats :input-tokens) 500))
+      (should (= (plist-get gptel-agent--session-stats :output-tokens) 1000))
+      (should (= (plist-get gptel-agent--session-stats :session-cost) 0.25)))))
+
+(ert-deftest gptel-agent-stats-test-load-from-session-persist-disabled ()
+  "Test loading statistics when persistence disabled."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-stats-persist nil)
+          (saved-stats (list :input-tokens 500)))
+      (gptel-agent-stats--load-from-session saved-stats)
+      (should-not gptel-agent--session-stats))))
+
+(ert-deftest gptel-agent-stats-test-load-from-session-nil-stats ()
+  "Test loading nil statistics."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-stats-persist t))
+      (gptel-agent-stats--load-from-session nil)
+      (should-not gptel-agent--session-stats))))
+
+;;;; Header String Edge Cases
+
+(ert-deftest gptel-agent-stats-test-header-string-nil-cost ()
+  "Test header string with nil cost."
+  (gptel-agent-stats-test--with-clean-state
+    (gptel-agent-stats--init-session)
+    (plist-put gptel-agent--session-stats :input-tokens 1000)
+    (plist-put gptel-agent--session-stats :output-tokens 2000)
+    (plist-put gptel-agent--session-stats :session-cost nil)
+    (let ((str (gptel-agent-stats--header-string)))
+      (should (stringp str))
+      (should (string-match-p "1\\.0k" str))
+      (should (string-match-p "2\\.0k" str))
+      ;; Cost portion should not be included
+      (should-not (string-match-p "\\$" str)))))
+
+(ert-deftest gptel-agent-stats-test-header-string-zero-tokens ()
+  "Test header string with zero tokens."
+  (gptel-agent-stats-test--with-clean-state
+    (gptel-agent-stats--init-session)
+    (let ((str (gptel-agent-stats--header-string)))
+      (should (stringp str))
+      (should (string-match-p "\\^0" str))
+      (should (string-match-p "v0" str)))))
+
+;;;; Model Pricing Edge Cases
+
+(ert-deftest gptel-agent-stats-test-get-model-pricing-symbol ()
+  "Test pricing lookup with symbol model name."
+  (let ((pricing (gptel-agent-stats--get-model-pricing 'gpt-4o)))
+    (should pricing)
+    (should (plist-get pricing :input))))
+
+(ert-deftest gptel-agent-stats-test-get-model-pricing-nil ()
+  "Test pricing lookup with nil model."
+  (should-not (gptel-agent-stats--get-model-pricing nil)))
+
+(ert-deftest gptel-agent-stats-test-calculate-cost-nil-pricing ()
+  "Test cost calculation when model not found."
+  (should (null (gptel-agent-stats--calculate-cost 1000 500 "totally-unknown-model"))))
+
+;;;; Track Response Edge Cases
+
+(ert-deftest gptel-agent-stats-test-track-response-no-session ()
+  "Test track response with no session stats."
+  (gptel-agent-stats-test--with-clean-state
+    ;; Should not error when session stats is nil
+    (gptel-agent-stats--track-response
+     '(:prompt "test" :response "response"))
+    (should-not gptel-agent--session-stats)))
+
+(ert-deftest gptel-agent-stats-test-track-response-nil-content ()
+  "Test track response with nil content."
+  (gptel-agent-stats-test--with-clean-state
+    (gptel-agent-stats--init-session)
+    (let ((gptel-model "gpt-4o"))
+      (gptel-agent-stats--track-response
+       '(:prompt nil :response nil)))
+    (should (= (plist-get gptel-agent--session-stats :input-tokens) 0))
+    (should (= (plist-get gptel-agent--session-stats :output-tokens) 0))))
+
+(ert-deftest gptel-agent-stats-test-track-response-with-model-in-info ()
+  "Test track response with model in info plist."
+  (gptel-agent-stats-test--with-clean-state
+    (gptel-agent-stats--init-session)
+    (gptel-agent-stats--track-response
+     '(:prompt "test" :response "response" :model "claude-3-5-sonnet"))
+    (let ((responses (plist-get gptel-agent--session-stats :responses)))
+      (should (= (length responses) 1))
+      (should (string= (plist-get (car responses) :model) "claude-3-5-sonnet")))))
+
+;;;; Export Edge Cases
+
+(ert-deftest gptel-agent-stats-test-export-csv-empty ()
+  "Test CSV export with no responses."
+  (let ((csv (gptel-agent-stats--export-csv nil)))
+    (should (stringp csv))
+    ;; Should still have header
+    (should (string-match-p "timestamp,model" csv))))
+
+(ert-deftest gptel-agent-stats-test-export-csv-nil-model ()
+  "Test CSV export with nil model."
+  (let* ((now (current-time))
+         (responses (list (list :timestamp now
+                               :model nil
+                               :input-tokens 100
+                               :output-tokens 200
+                               :cost 0.05)))
+         (csv (gptel-agent-stats--export-csv responses)))
+    (should (stringp csv))
+    ;; Should handle nil model gracefully
+    (should (string-match-p "100" csv))))
+
+(ert-deftest gptel-agent-stats-test-export-json-nil-session ()
+  "Test JSON export with nil values."
+  (gptel-agent-stats-test--with-clean-state
+    (gptel-agent-stats--init-session)
+    (plist-put gptel-agent--session-stats :model nil)
+    (let ((json (gptel-agent-stats--export-json gptel-agent--session-stats)))
+      (should (stringp json)))))
+
+;;;; Buffer Local Variable Tests
+
+(ert-deftest gptel-agent-stats-test-session-stats-buffer-local ()
+  "Test session stats is buffer-local."
+  (with-temp-buffer
+    (gptel-agent-stats--init-session)
+    (plist-put gptel-agent--session-stats :input-tokens 500)
+    (with-temp-buffer
+      (should (null gptel-agent--session-stats)))
+    (should (= (plist-get gptel-agent--session-stats :input-tokens) 500))))
+
+;;;; Customization Group Tests
+
+(ert-deftest gptel-agent-stats-test-custom-group-exists ()
+  "Test customization group is defined."
+  (should (get 'gptel-agent-stats 'custom-group)))
+
+(ert-deftest gptel-agent-stats-test-show-in-header-default ()
+  "Test default value for show-in-header."
+  (should (default-value 'gptel-agent-stats-show-in-header)))
+
+(ert-deftest gptel-agent-stats-test-persist-default ()
+  "Test default value for persist."
+  (should (default-value 'gptel-agent-stats-persist)))
+
+(ert-deftest gptel-agent-stats-test-budget-limit-default ()
+  "Test default value for budget-limit."
+  (should (null (default-value 'gptel-agent-budget-limit))))
+
+;;;; Minor Mode Hook Tests
+
+(ert-deftest gptel-agent-stats-test-mode-adds-hook ()
+  "Test minor mode adds response hook."
+  (with-temp-buffer
+    (gptel-agent-stats-test--reset)
+    (gptel-agent-stats-mode 1)
+    (should (memq #'gptel-agent-stats--track-response
+                  gptel-post-response-functions))
+    (gptel-agent-stats-mode -1)))
+
+(ert-deftest gptel-agent-stats-test-mode-removes-hook ()
+  "Test minor mode removes response hook."
+  (with-temp-buffer
+    (gptel-agent-stats-test--reset)
+    (gptel-agent-stats-mode 1)
+    (gptel-agent-stats-mode -1)
+    (should-not (memq #'gptel-agent-stats--track-response
+                      gptel-post-response-functions))))
+
+;;;; Formatting Edge Cases
+
+(ert-deftest gptel-agent-stats-test-format-tokens-zero ()
+  "Test token formatting for zero."
+  (should (string= (gptel-agent-stats--format-tokens 0) "0")))
+
+(ert-deftest gptel-agent-stats-test-format-tokens-boundary-999 ()
+  "Test token formatting at k boundary."
+  (should (string= (gptel-agent-stats--format-tokens 1000) "1.0k")))
+
+(ert-deftest gptel-agent-stats-test-format-tokens-boundary-999999 ()
+  "Test token formatting at M boundary."
+  (should (string= (gptel-agent-stats--format-tokens 1000000) "1.0M")))
+
+(ert-deftest gptel-agent-stats-test-format-cost-zero ()
+  "Test cost formatting for zero."
+  (should (string= (gptel-agent-stats--format-cost 0.0) "$0.00")))
+
+(ert-deftest gptel-agent-stats-test-format-cost-large ()
+  "Test cost formatting for large amounts."
+  (should (string= (gptel-agent-stats--format-cost 123.456) "$123.46")))
+
+;;;; Stats Display Tests
+
+(ert-deftest gptel-agent-stats-test-stats-display-no-session ()
+  "Test stats display with no session."
+  (gptel-agent-stats-test--with-clean-state
+    (gptel-agent-stats)
+    (with-current-buffer "*GPTel Agent Stats*"
+      (should (string-match-p "No active session" (buffer-string))))
+    (kill-buffer "*GPTel Agent Stats*")))
+
+(ert-deftest gptel-agent-stats-test-stats-display-no-cumulative ()
+  "Test stats display with no cumulative data."
+  (gptel-agent-stats-test--with-clean-state
+    (gptel-agent-stats--init-session)
+    (gptel-agent-stats)
+    (with-current-buffer "*GPTel Agent Stats*"
+      (should (string-match-p "No cumulative data" (buffer-string))))
+    (kill-buffer "*GPTel Agent Stats*")))
+
+(ert-deftest gptel-agent-stats-test-stats-display-with-budget ()
+  "Test stats display with budget set."
+  (gptel-agent-stats-test--with-clean-state
+    (let ((gptel-agent-budget-limit 10.00))
+      (gptel-agent-stats--init-session)
+      (gptel-agent-stats--init-budget-period)
+      (gptel-agent-stats)
+      (with-current-buffer "*GPTel Agent Stats*"
+        (should (string-match-p "Budget Status" (buffer-string))))
+      (kill-buffer "*GPTel Agent Stats*"))))
+
+(ert-deftest gptel-agent-stats-test-stats-display-response-breakdown ()
+  "Test stats display with response breakdown."
+  (gptel-agent-stats-test--with-clean-state
+    (gptel-agent-stats--init-session)
+    (push (list :timestamp (current-time)
+               :input-tokens 100
+               :output-tokens 200
+               :cost 0.05
+               :model "gpt-4o")
+          (plist-get gptel-agent--session-stats :responses))
+    (gptel-agent-stats)
+    (with-current-buffer "*GPTel Agent Stats*"
+      (should (string-match-p "Response Breakdown" (buffer-string))))
+    (kill-buffer "*GPTel Agent Stats*")))
+
 (provide 'gptel-agent-stats-test)
 ;;; gptel-agent-stats-test.el ends here
