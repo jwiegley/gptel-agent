@@ -224,8 +224,7 @@
   "Test tool call counter increments."
   (with-temp-buffer
     (setq gptel-agent--checkpoint-tool-count 0)
-    (setq gptel-agent-checkpoint-frequency nil)  ; Disable auto-checkpoint
-    (let ((gptel-agent-checkpoint-frequency nil))
+    (let ((gptel-agent-checkpoint-frequency nil))  ; Disable auto-checkpoint
       (gptel-agent--maybe-auto-checkpoint))
     ;; Counter should still increment even when disabled
     (should (= gptel-agent--checkpoint-tool-count 0))))
@@ -293,6 +292,466 @@
   (should (lookup-key gptel-agent-checkpoints-mode-map (kbd "d")))
   (should (lookup-key gptel-agent-checkpoints-mode-map (kbd "x"))))
 
+;;;; Additional Serialization Tests
+
+(ert-deftest gptel-agent-checkpoints-test-serialize-messages-truncation ()
+  "Test message truncation during serialization."
+  (with-temp-buffer
+    (let ((gptel-agent-checkpoint-max-message-size 100)
+          (large-content (make-string 200 ?x)))
+      (cl-letf (((symbol-function 'gptel-agent--get-buffer-messages-for-checkpoint)
+                 (lambda ()
+                   (list (list :role 'user :content large-content)))))
+        (let ((serialized (gptel-agent--serialize-messages)))
+          (should serialized)
+          ;; Content should be truncated
+          (let ((content (plist-get (car serialized) :content)))
+            (should (< (length content) 200))
+            (should (string-match-p "truncated" content))))))))
+
+(ert-deftest gptel-agent-checkpoints-test-serialize-messages-empty ()
+  "Test serialization with no messages."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'gptel-agent--get-buffer-messages-for-checkpoint)
+               (lambda () nil)))
+      (should-not (gptel-agent--serialize-messages)))))
+
+(ert-deftest gptel-agent-checkpoints-test-serialize-messages-small ()
+  "Test serialization with small messages."
+  (with-temp-buffer
+    (let ((gptel-agent-checkpoint-max-message-size 1000))
+      (cl-letf (((symbol-function 'gptel-agent--get-buffer-messages-for-checkpoint)
+                 (lambda ()
+                   (list (list :role 'user :content "Hello world")))))
+        (let ((serialized (gptel-agent--serialize-messages)))
+          (should serialized)
+          ;; Content should not be truncated
+          (should (string= (plist-get (car serialized) :content)
+                          "Hello world")))))))
+
+(ert-deftest gptel-agent-checkpoints-test-serialize-fsm-state-bound ()
+  "Test FSM state serialization when bound."
+  (with-temp-buffer
+    ;; Define and set the variable so boundp can detect it
+    (defvar gptel--fsm-last nil "Mock FSM state for testing.")
+    (setq gptel--fsm-last 'some-state)
+    (unwind-protect
+        (should (eq (gptel-agent--serialize-fsm-state) 'some-state))
+      (makunbound 'gptel--fsm-last))))
+
+(ert-deftest gptel-agent-checkpoints-test-serialize-fsm-state-unbound ()
+  "Test FSM state serialization when unbound."
+  (with-temp-buffer
+    ;; Make sure gptel--fsm-last is not bound
+    (should-not (gptel-agent--serialize-fsm-state))))
+
+;;;; Deserialization Edge Cases
+
+(ert-deftest gptel-agent-checkpoints-test-deserialize-partial-state ()
+  "Test deserialization with partial state."
+  (with-temp-buffer
+    (let ((state (list :todos '((:content "Test" :status "pending")))))
+      ;; Only todos, no pending-tools or buffer-state
+      (gptel-agent--deserialize-checkpoint-state state)
+      (should gptel-agent--todos)
+      (should (= (length gptel-agent--todos) 1)))))
+
+(ert-deftest gptel-agent-checkpoints-test-deserialize-fsm-state ()
+  "Test FSM state restoration."
+  (with-temp-buffer
+    ;; Define and set the variable so boundp can detect it
+    (defvar gptel--fsm-last nil "Mock FSM state for testing.")
+    (setq gptel--fsm-last nil)
+    (unwind-protect
+        (let ((state (list :fsm-state 'restored-state)))
+          (gptel-agent--deserialize-checkpoint-state state)
+          (should (eq gptel--fsm-last 'restored-state)))
+      (makunbound 'gptel--fsm-last))))
+
+(ert-deftest gptel-agent-checkpoints-test-deserialize-buffer-state-nil-tool-count ()
+  "Test deserialization when tool-count is nil."
+  (with-temp-buffer
+    (setq gptel-agent--checkpoint-tool-count 10)
+    (let ((state (list :buffer-state '(:point 1))))
+      (gptel-agent--deserialize-checkpoint-state state)
+      ;; Should be 0 when nil
+      (should (= gptel-agent--checkpoint-tool-count 0)))))
+
+;;;; Auto Checkpoint Tests
+
+(ert-deftest gptel-agent-checkpoints-test-auto-checkpoint-trigger ()
+  "Test auto-checkpoint triggers at threshold."
+  (with-temp-buffer
+    (let ((gptel-agent-checkpoint-frequency 3)
+          (gptel-agent--checkpoint-tool-count 2)
+          (gptel-agent--current-session-id "test")
+          (checkpoint-created nil))
+      (cl-letf (((symbol-function 'gptel-agent--create-checkpoint)
+                 (lambda (_desc)
+                   (setq checkpoint-created t))))
+        (gptel-agent--maybe-auto-checkpoint)
+        (should checkpoint-created)
+        (should (= gptel-agent--checkpoint-tool-count 0))))))
+
+(ert-deftest gptel-agent-checkpoints-test-auto-checkpoint-below-threshold ()
+  "Test auto-checkpoint doesn't trigger below threshold."
+  (with-temp-buffer
+    (let ((gptel-agent-checkpoint-frequency 5)
+          (gptel-agent--checkpoint-tool-count 2)
+          (checkpoint-created nil))
+      (cl-letf (((symbol-function 'gptel-agent--create-checkpoint)
+                 (lambda (_desc)
+                   (setq checkpoint-created t))))
+        (gptel-agent--maybe-auto-checkpoint)
+        (should-not checkpoint-created)
+        (should (= gptel-agent--checkpoint-tool-count 3))))))
+
+(ert-deftest gptel-agent-checkpoints-test-auto-checkpoint-error-handling ()
+  "Test auto-checkpoint handles errors gracefully."
+  (with-temp-buffer
+    (let ((gptel-agent-checkpoint-frequency 1)
+          (gptel-agent--checkpoint-tool-count 0)
+          (message-called nil))
+      (cl-letf (((symbol-function 'gptel-agent--create-checkpoint)
+                 (lambda (_desc)
+                   (error "Test error")))
+                ((symbol-function 'message)
+                 (lambda (&rest _)
+                   (setq message-called t))))
+        ;; Should not error, just message
+        (gptel-agent--maybe-auto-checkpoint)
+        (should message-called)))))
+
+;;;; Multi-Step Checkpoint Tests
+
+(ert-deftest gptel-agent-checkpoints-test-before-multi-step ()
+  "Test checkpoint before multi-step task."
+  (with-temp-buffer
+    (let ((gptel-agent-checkpoint-on-multi-step t)
+          (checkpoint-created nil)
+          (checkpoint-desc nil))
+      (cl-letf (((symbol-function 'gptel-agent--create-checkpoint)
+                 (lambda (desc)
+                   (setq checkpoint-created t
+                         checkpoint-desc desc))))
+        (gptel-agent--checkpoint-before-multi-step "refactoring")
+        (should checkpoint-created)
+        (should (string-match-p "refactoring" checkpoint-desc))))))
+
+(ert-deftest gptel-agent-checkpoints-test-before-multi-step-disabled ()
+  "Test multi-step checkpoint disabled."
+  (with-temp-buffer
+    (let ((gptel-agent-checkpoint-on-multi-step nil)
+          (checkpoint-created nil))
+      (cl-letf (((symbol-function 'gptel-agent--create-checkpoint)
+                 (lambda (_desc)
+                   (setq checkpoint-created t))))
+        (gptel-agent--checkpoint-before-multi-step "refactoring")
+        (should-not checkpoint-created)))))
+
+(ert-deftest gptel-agent-checkpoints-test-before-multi-step-error-handling ()
+  "Test multi-step checkpoint error handling."
+  (with-temp-buffer
+    (let ((gptel-agent-checkpoint-on-multi-step t)
+          (message-called nil))
+      (cl-letf (((symbol-function 'gptel-agent--create-checkpoint)
+                 (lambda (_desc)
+                   (error "Test error")))
+                ((symbol-function 'message)
+                 (lambda (&rest _)
+                   (setq message-called t))))
+        (gptel-agent--checkpoint-before-multi-step "test")
+        (should message-called)))))
+
+;;;; Create Checkpoint Tests
+
+(ert-deftest gptel-agent-checkpoints-test-create-checkpoint-no-session ()
+  "Test create checkpoint with no session."
+  (with-temp-buffer
+    (setq gptel-agent--current-session-id nil)
+    (let ((save-called nil))
+      (cl-letf (((symbol-function 'gptel-agent--checkpoint-save)
+                 (lambda (&rest _)
+                   (setq save-called t) 1)))
+        (gptel-agent--create-checkpoint "test")
+        (should-not save-called)))))
+
+(ert-deftest gptel-agent-checkpoints-test-create-checkpoint-with-session ()
+  "Test create checkpoint with active session."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-checkpoints-test--with-temp-env
+    (with-temp-buffer
+      (let ((session-id (gptel-agent-session-create "/test" "Test")))
+        (setq gptel-agent--current-session-id session-id)
+        (gptel-agent--create-checkpoint "test description")
+        ;; Should have created checkpoint
+        (let ((checkpoints (gptel-agent--checkpoint-list session-id)))
+          (should (= (length checkpoints) 1)))))))
+
+;;;; Manual Checkpoint Command Tests
+
+(ert-deftest gptel-agent-checkpoints-test-manual-checkpoint-with-description ()
+  "Test manual checkpoint with description."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-checkpoints-test--with-temp-env
+    (with-temp-buffer
+      (let ((session-id (gptel-agent-session-create "/test" "Test")))
+        (setq gptel-agent--current-session-id session-id)
+        (gptel-agent-checkpoint "My custom description")
+        (let ((checkpoints (gptel-agent--checkpoint-list session-id)))
+          (should (= (length checkpoints) 1)))))))
+
+(ert-deftest gptel-agent-checkpoints-test-manual-checkpoint-auto-description ()
+  "Test manual checkpoint with auto-generated description."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-checkpoints-test--with-temp-env
+    (with-temp-buffer
+      (let ((session-id (gptel-agent-session-create "/test" "Test")))
+        (setq gptel-agent--current-session-id session-id)
+        (gptel-agent-checkpoint)
+        (let ((checkpoints (gptel-agent--checkpoint-list session-id)))
+          (should (= (length checkpoints) 1)))))))
+
+;;;; Recovery Interface Tests
+
+(ert-deftest gptel-agent-checkpoints-test-recover-no-session ()
+  "Test recover with no active session."
+  (with-temp-buffer
+    (setq gptel-agent--current-session-id nil)
+    (setq gptel-agent-checkpoint-auto-recover t)
+    ;; Should not error, just do nothing
+    (gptel-agent-recover)))
+
+(ert-deftest gptel-agent-checkpoints-test-recover-auto-disabled ()
+  "Test recover when auto-recovery disabled."
+  (with-temp-buffer
+    (setq gptel-agent--current-session-id "test")
+    (setq gptel-agent-checkpoint-auto-recover nil)
+    (let ((restore-called nil))
+      (cl-letf (((symbol-function 'gptel-agent-restore-checkpoint)
+                 (lambda (_id)
+                   (setq restore-called t))))
+        (gptel-agent-recover)
+        (should-not restore-called)))))
+
+(ert-deftest gptel-agent-checkpoints-test-recover-no-checkpoints ()
+  "Test recover with no checkpoints available."
+  (with-temp-buffer
+    (setq gptel-agent--current-session-id "test")
+    (setq gptel-agent-checkpoint-auto-recover t)
+    (cl-letf (((symbol-function 'gptel-agent--checkpoint-get-latest)
+               (lambda (_id) nil)))
+      ;; Should not error
+      (gptel-agent-recover))))
+
+;;;; Restore Checkpoint Tests
+
+(ert-deftest gptel-agent-checkpoints-test-restore-not-found ()
+  "Test restore with nonexistent checkpoint."
+  (cl-letf (((symbol-function 'gptel-agent--checkpoint-load)
+             (lambda (_id) nil)))
+    (should-error (gptel-agent-restore-checkpoint 999)
+                  :type 'user-error)))
+
+(ert-deftest gptel-agent-checkpoints-test-restore-success ()
+  "Test successful checkpoint restore."
+  (with-temp-buffer
+    (let ((state (list :todos '((:content "Restored" :status "pending"))
+                      :buffer-state '(:tool-count 5))))
+      (cl-letf (((symbol-function 'gptel-agent--checkpoint-load)
+                 (lambda (_id)
+                   (list :id 1
+                         :state state
+                         :created-at "2025-01-01"))))
+        (gptel-agent-restore-checkpoint 1)
+        (should gptel-agent--todos)
+        (should (= gptel-agent--checkpoint-tool-count 5))))))
+
+;;;; Session Lifecycle Tests
+
+(ert-deftest gptel-agent-checkpoints-test-session-start-hook ()
+  "Test session start hook sets state."
+  (with-temp-buffer
+    (setq gptel-agent--session-interrupted nil)
+    (setq gptel-agent--checkpoint-tool-count 10)
+    (setq gptel-agent--current-session-id nil)  ; Prevent recovery
+    (gptel-agent-checkpoints--session-start)
+    (should gptel-agent--session-interrupted)
+    (should (= gptel-agent--checkpoint-tool-count 0))))
+
+(ert-deftest gptel-agent-checkpoints-test-session-end-hook ()
+  "Test session end hook clears interrupted flag."
+  (with-temp-buffer
+    (setq gptel-agent--session-interrupted t)
+    (gptel-agent-checkpoints--session-end)
+    (should-not gptel-agent--session-interrupted)))
+
+;;;; Checkpoint Count API Tests
+
+(ert-deftest gptel-agent-checkpoints-test-count-with-session ()
+  "Test checkpoint count with active session."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-checkpoints-test--with-temp-env
+    (with-temp-buffer
+      (let ((session-id (gptel-agent-session-create "/test" "Test")))
+        (setq gptel-agent--current-session-id session-id)
+        (gptel-agent--checkpoint-save session-id '(:timestamp "1"))
+        (gptel-agent--checkpoint-save session-id '(:timestamp "2"))
+        (should (= (gptel-agent-checkpoint-count) 2))))))
+
+;;;; Tool Call Tracking API Tests
+
+(ert-deftest gptel-agent-checkpoints-test-tool-call-with-mode-enabled ()
+  "Test tool call tracking when mode enabled."
+  (with-temp-buffer
+    (gptel-agent-checkpoints-mode 1)
+    (let ((gptel-agent-checkpoint-frequency nil)
+          (auto-called nil))
+      (cl-letf (((symbol-function 'gptel-agent--maybe-auto-checkpoint)
+                 (lambda () (setq auto-called t))))
+        (gptel-agent-checkpoint-tool-call)
+        (should auto-called)))
+    (gptel-agent-checkpoints-mode -1)))
+
+(ert-deftest gptel-agent-checkpoints-test-tool-call-with-mode-disabled ()
+  "Test tool call tracking when mode disabled."
+  (with-temp-buffer
+    (gptel-agent-checkpoints-mode -1)
+    (let ((auto-called nil))
+      (cl-letf (((symbol-function 'gptel-agent--maybe-auto-checkpoint)
+                 (lambda () (setq auto-called t))))
+        (gptel-agent-checkpoint-tool-call)
+        (should-not auto-called)))))
+
+;;;; Customization Tests
+
+(ert-deftest gptel-agent-checkpoints-test-custom-group-exists ()
+  "Test customization group is defined."
+  (should (get 'gptel-agent-checkpoints 'custom-group)))
+
+(ert-deftest gptel-agent-checkpoints-test-on-multi-step-default ()
+  "Test default value for checkpoint-on-multi-step."
+  (should (default-value 'gptel-agent-checkpoint-on-multi-step)))
+
+(ert-deftest gptel-agent-checkpoints-test-max-message-size-default ()
+  "Test default max message size."
+  (should (= (default-value 'gptel-agent-checkpoint-max-message-size) 100000)))
+
+;;;; Buffer-Local Variable Tests
+
+(ert-deftest gptel-agent-checkpoints-test-tool-count-buffer-local ()
+  "Test tool count is buffer-local."
+  (with-temp-buffer
+    (setq gptel-agent--checkpoint-tool-count 5)
+    (with-temp-buffer
+      (should (= gptel-agent--checkpoint-tool-count 0)))
+    (should (= gptel-agent--checkpoint-tool-count 5))))
+
+(ert-deftest gptel-agent-checkpoints-test-interrupted-buffer-local ()
+  "Test interrupted flag is buffer-local."
+  (with-temp-buffer
+    (setq gptel-agent--session-interrupted t)
+    (with-temp-buffer
+      (should-not gptel-agent--session-interrupted))
+    (should gptel-agent--session-interrupted)))
+
+(ert-deftest gptel-agent-checkpoints-test-pending-tools-buffer-local ()
+  "Test pending tools is buffer-local."
+  (with-temp-buffer
+    (setq gptel-agent--pending-tool-calls '((:tool "Read")))
+    (with-temp-buffer
+      (should-not gptel-agent--pending-tool-calls))
+    (should gptel-agent--pending-tool-calls)))
+
+(ert-deftest gptel-agent-checkpoints-test-todos-buffer-local ()
+  "Test todos is buffer-local."
+  (with-temp-buffer
+    (setq gptel-agent--todos '((:content "Test")))
+    (with-temp-buffer
+      (should-not gptel-agent--todos))
+    (should gptel-agent--todos)))
+
+;;;; List Mode UI Tests
+
+(ert-deftest gptel-agent-checkpoints-test-refresh-empty ()
+  "Test refresh with no checkpoints."
+  (with-temp-buffer
+    (gptel-agent-checkpoints-mode)
+    (setq gptel-agent-checkpoints--session-id nil)
+    ;; Should not error with nil session
+    (gptel-agent-checkpoints-refresh)))
+
+(ert-deftest gptel-agent-checkpoints-test-mark-delete ()
+  "Test mark for delete."
+  (with-temp-buffer
+    (gptel-agent-checkpoints-mode)
+    ;; Mock tabulated-list-put-tag since we can't easily set up a real tabulated list
+    (let ((mark-called nil))
+      (cl-letf (((symbol-function 'tabulated-list-put-tag)
+                 (lambda (tag &optional _advance)
+                   (setq mark-called t)
+                   (forward-line 1))))
+        (insert "Test line\n")
+        (goto-char (point-min))
+        (gptel-agent-checkpoints-mark-delete)
+        (should mark-called)))))
+
+(ert-deftest gptel-agent-checkpoints-test-execute-no-marks ()
+  "Test execute with no marked items."
+  (with-temp-buffer
+    (let ((deleted 0))
+      (cl-letf (((symbol-function 'tabulated-list-get-id)
+                 (lambda () nil))
+                ((symbol-function 'gptel-agent-checkpoints-refresh)
+                 (lambda () nil)))
+        (gptel-agent-checkpoints-execute)
+        ;; Should complete without error
+        (should t)))))
+
+;;;; Edge Case Tests
+
+(ert-deftest gptel-agent-checkpoints-test-serialize-pending-tools-nil ()
+  "Test serialization with nil pending tools."
+  (with-temp-buffer
+    (setq gptel-agent--pending-tool-calls nil)
+    (should-not (gptel-agent--serialize-pending-tools))))
+
+(ert-deftest gptel-agent-checkpoints-test-restore-messages-placeholder ()
+  "Test restore messages placeholder doesn't error."
+  (with-temp-buffer
+    (should (null (gptel-agent--restore-messages '((:role user :content "test")))))))
+
+(ert-deftest gptel-agent-checkpoints-test-get-buffer-messages-placeholder ()
+  "Test get buffer messages placeholder returns nil."
+  (with-temp-buffer
+    (should-not (gptel-agent--get-buffer-messages-for-checkpoint))))
+
+;;;; Cleanup Policy Tests
+
+(ert-deftest gptel-agent-checkpoints-test-cleanup-respects-retention ()
+  "Test cleanup keeps exactly retention count checkpoints."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-checkpoints-test--with-temp-env
+    (let ((gptel-agent-checkpoint-retention 3)
+          (session-id (gptel-agent-session-create "/test" "Test")))
+      ;; Create 10 checkpoints
+      (dotimes (_ 10)
+        (gptel-agent--checkpoint-save session-id '(:timestamp "x")))
+      (gptel-agent--checkpoint-cleanup session-id)
+      (should (= (length (gptel-agent--checkpoint-list session-id)) 3)))))
+
+(ert-deftest gptel-agent-checkpoints-test-cleanup-with-high-retention ()
+  "Test cleanup keeps all when retention is high."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-checkpoints-test--with-temp-env
+    (let ((gptel-agent-checkpoint-retention 100)
+          (session-id (gptel-agent-session-create "/test" "Test")))
+      ;; Create 5 checkpoints
+      (dotimes (_ 5)
+        (gptel-agent--checkpoint-save session-id '(:timestamp "x")))
+      (gptel-agent--checkpoint-cleanup session-id)
+      (should (= (length (gptel-agent--checkpoint-list session-id)) 5)))))
+
 ;;;; Integration Tests
 
 (ert-deftest gptel-agent-checkpoints-test-full-cycle ()
@@ -328,6 +787,20 @@
       (gptel-agent-checkpoint-tool-call))
     ;; Tool count should be unchanged when frequency is nil
     (gptel-agent-checkpoints-mode -1)))
+
+(ert-deftest gptel-agent-checkpoints-test-multiple-sessions-isolation ()
+  "Test checkpoints are isolated between sessions."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-checkpoints-test--with-temp-env
+    (let ((session1 (gptel-agent-session-create "/test1" "Test1"))
+          (session2 (gptel-agent-session-create "/test2" "Test2")))
+      ;; Create checkpoints in different sessions
+      (gptel-agent--checkpoint-save session1 '(:timestamp "s1-1"))
+      (gptel-agent--checkpoint-save session1 '(:timestamp "s1-2"))
+      (gptel-agent--checkpoint-save session2 '(:timestamp "s2-1"))
+      ;; Each session should have correct count
+      (should (= (length (gptel-agent--checkpoint-list session1)) 2))
+      (should (= (length (gptel-agent--checkpoint-list session2)) 1)))))
 
 (provide 'gptel-agent-checkpoints-test)
 ;;; gptel-agent-checkpoints-test.el ends here

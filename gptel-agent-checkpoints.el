@@ -58,6 +58,39 @@
 (defvar gptel-agent--current-session-id)
 (defvar gptel--fsm-last)
 
+;;;; Helper Functions
+
+(defun gptel-agent--alist-to-plist (alist)
+  "Convert ALIST to a plist with keyword keys.
+Recursively converts nested alists. Non-alist values are returned as-is."
+  (cond
+   ;; Not a list at all (string, number, symbol, etc.) - return as-is
+   ((not (consp alist)) alist)
+   ;; Empty list
+   ((null alist) nil)
+   ;; Check if it looks like an alist (list of cons cells with symbol keys)
+   ((and (consp (car alist)) (symbolp (caar alist)))
+    (let ((result nil))
+      (dolist (pair alist)
+        (let ((key (car pair))
+              (val (cdr pair)))
+          ;; Convert key to keyword
+          (push (intern (concat ":" (symbol-name key))) result)
+          ;; Recursively convert nested alists
+          (push (cond
+                 ((and (consp val) (not (stringp val))
+                       (consp (car val)) (symbolp (caar val)))
+                  ;; Looks like an alist with symbol keys
+                  (gptel-agent--alist-to-plist val))
+                 ((and (vectorp val))
+                  ;; Convert vector of alists
+                  (cl-map 'vector #'gptel-agent--alist-to-plist val))
+                 (t val))
+                result)))
+      (nreverse result)))
+   ;; Not an alist - return as-is
+   (t alist)))
+
 (defgroup gptel-agent-checkpoints nil
   "Checkpoint and recovery for gptel-agent."
   :group 'gptel
@@ -253,7 +286,8 @@ Returns a plist with :id, :session-id, :created-at, :state."
       (let ((row (car rows)))
         (list :id (nth 0 row)
               :session-id (nth 1 row)
-              :state (json-read-from-string (nth 2 row))
+              :state (gptel-agent--alist-to-plist
+                      (json-read-from-string (nth 2 row)))
               :created-at (nth 3 row))))))
 
 (defun gptel-agent--checkpoint-list (session-id)
@@ -300,13 +334,14 @@ Keeps the `gptel-agent-checkpoint-retention' most recent checkpoints."
                             "SELECT id, checkpoint_data, created_at
                              FROM checkpoints
                              WHERE session_id = ?
-                             ORDER BY created_at DESC
+                             ORDER BY created_at DESC, id DESC
                              LIMIT 1"
                             (list session-id))))
     (when (car rows)
       (let ((row (car rows)))
         (list :id (nth 0 row)
-              :state (json-read-from-string (nth 1 row))
+              :state (gptel-agent--alist-to-plist
+                      (json-read-from-string (nth 1 row)))
               :created-at (nth 2 row))))))
 
 ;;;; Automatic Checkpoints
