@@ -43,6 +43,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
 (eval-when-compile (require 'subr-x))
 
 (declare-function sqlite-available-p "sqlite")

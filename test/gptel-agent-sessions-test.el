@@ -434,7 +434,10 @@
   (gptel-agent-sessions-test--with-temp-env
     (with-temp-buffer
       (gptel-agent-session-mode 1)
-      (should (string-match-p "Sess" (format-mode-line minor-mode-alist)))
+      ;; Check that the minor mode is in the alist with the correct lighter
+      (let ((entry (assq 'gptel-agent-session-mode minor-mode-alist)))
+        (should entry)
+        (should (string-match-p "Sess" (cadr entry))))
       (gptel-agent-session-mode -1))))
 
 ;;;; Interactive Command Tests
@@ -447,9 +450,349 @@
   "Test resume command exists."
   (should (fboundp 'gptel-agent-resume)))
 
-(ert-deftest gptel-agent-sessions-test-status-command ()
-  "Test session mode status command."
-  (should (fboundp 'gptel-agent-mode-status)))
+;; Note: gptel-agent-mode-status is defined in gptel-agent-modes.el
+;; and is tested in gptel-agent-modes-test.el
+
+;;;; Additional Database Tests
+
+(ert-deftest gptel-agent-sessions-test-close-database ()
+  "Test database close operation."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-database)
+    (should gptel-agent--session-db)
+    (gptel-agent--close-database)
+    (should-not gptel-agent--session-db)))
+
+(ert-deftest gptel-agent-sessions-test-ensure-database ()
+  "Test ensure database creates connection."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-sessions-test--with-temp-env
+    (should-not gptel-agent--session-db)
+    (gptel-agent--ensure-database)
+    (should gptel-agent--session-db)))
+
+(ert-deftest gptel-agent-sessions-test-ensure-database-idempotent ()
+  "Test ensure database is idempotent."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--ensure-database)
+    (let ((db1 gptel-agent--session-db))
+      (gptel-agent--ensure-database)
+      ;; Should be same connection
+      (should (eq db1 gptel-agent--session-db)))))
+
+;;;; JSON Write Atomic Tests
+
+(ert-deftest gptel-agent-sessions-test-json-write-atomic ()
+  "Test atomic JSON write."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--ensure-json-dir)
+    (let* ((file (expand-file-name "test.json" gptel-agent-session-json-dir))
+           (data '(:test "data" :number 42)))
+      (gptel-agent--json-write-atomic file data)
+      (should (file-exists-p file))
+      (let ((read-data (json-read-file file)))
+        (should (equal (alist-get 'test read-data) "data"))))))
+
+(ert-deftest gptel-agent-sessions-test-json-write-atomic-overwrites ()
+  "Test atomic JSON write overwrites existing file."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--ensure-json-dir)
+    (let* ((file (expand-file-name "test.json" gptel-agent-session-json-dir))
+           (data1 '(:version 1))
+           (data2 '(:version 2)))
+      (gptel-agent--json-write-atomic file data1)
+      (gptel-agent--json-write-atomic file data2)
+      (let ((read-data (json-read-file file)))
+        (should (equal (alist-get 'version read-data) 2))))))
+
+;;;; Retention Policy Tests
+
+(ert-deftest gptel-agent-sessions-test-cleanup-old-sessions-function ()
+  "Test cleanup function exists and can be called."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    ;; Should not error when called
+    (gptel-agent--cleanup-old-sessions)))
+
+(ert-deftest gptel-agent-sessions-test-cleanup-respects-archive ()
+  "Test cleanup doesn't delete archived sessions."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-database)
+    (setq gptel-agent--storage-backend 'sqlite)
+    ;; Set very short retention
+    (let ((gptel-agent-session-retention-days 0)
+          (gptel-agent-session-retention-count 0))
+      ;; Create and archive a session
+      (let ((id (gptel-agent--sqlite-session-create "/test" "Archived")))
+        (gptel-agent--sqlite-session-set-archived id t)
+        (gptel-agent--cleanup-old-sessions)
+        ;; Archived session should still exist
+        (should (gptel-agent--sqlite-session-load id))))))
+
+(ert-deftest gptel-agent-sessions-test-cleanup-json-noop ()
+  "Test cleanup is no-op for JSON backend."
+  (gptel-agent-sessions-test--with-temp-env
+    (setq gptel-agent--storage-backend 'json)
+    (gptel-agent--ensure-json-dir)
+    ;; Should not error
+    (gptel-agent--cleanup-old-sessions)))
+
+;;;; Save If Dirty Tests
+
+(ert-deftest gptel-agent-sessions-test-save-if-dirty-no-session ()
+  "Test save-if-dirty does nothing without session."
+  (with-temp-buffer
+    (setq gptel-agent--current-session-id nil)
+    (setq gptel-agent--session-dirty t)
+    ;; Should not error
+    (gptel-agent--save-if-dirty)))
+
+(ert-deftest gptel-agent-sessions-test-save-if-dirty-not-dirty ()
+  "Test save-if-dirty does nothing when not dirty."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (with-temp-buffer
+      (setq gptel-agent--current-session-id
+            (gptel-agent-session-create "/test" "Test"))
+      (setq gptel-agent--session-dirty nil)
+      ;; Should not error
+      (gptel-agent--save-if-dirty))))
+
+;;;; Save on Kill Tests
+
+(ert-deftest gptel-agent-sessions-test-save-on-kill ()
+  "Test save on kill stops timer and saves."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (with-temp-buffer
+      (gptel-agent--start-auto-save)
+      (should gptel-agent--auto-save-timer)
+      (gptel-agent--save-on-kill)
+      (should-not gptel-agent--auto-save-timer))))
+
+;;;; Get Buffer Messages Tests
+
+(ert-deftest gptel-agent-sessions-test-get-buffer-messages-default ()
+  "Test default get-buffer-messages returns nil."
+  (with-temp-buffer
+    (should-not (gptel-agent--get-buffer-messages))))
+
+;;;; Session Browser Refresh Tests
+
+(ert-deftest gptel-agent-sessions-test-refresh-populates-entries ()
+  "Test refresh populates tabulated list entries."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (gptel-agent-session-create "/test" "Test Session")
+    (gptel-agent-sessions)
+    (with-current-buffer "*GPTel Agent Sessions*"
+      (gptel-agent-sessions-refresh)
+      (should tabulated-list-entries)
+      (should (>= (length tabulated-list-entries) 1)))
+    (kill-buffer "*GPTel Agent Sessions*")))
+
+;;;; Session Browser Mark Delete Tests
+
+(ert-deftest gptel-agent-sessions-test-mark-delete ()
+  "Test mark for deletion."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (gptel-agent-session-create "/test" "Test")
+    (gptel-agent-sessions)
+    (with-current-buffer "*GPTel Agent Sessions*"
+      (gptel-agent-sessions-refresh)
+      ;; In batch mode, header may not be present
+      (goto-char (point-min))
+      ;; Ensure we're on a valid entry
+      (should (tabulated-list-get-id))
+      (gptel-agent-sessions-mark-delete)
+      (goto-char (point-min))
+      (should (eq (char-after) ?D)))
+    (kill-buffer "*GPTel Agent Sessions*")))
+
+;;;; Session Browser Execute Tests
+
+(ert-deftest gptel-agent-sessions-test-execute-deletion ()
+  "Test execute processes marked deletions."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (let ((id (gptel-agent-session-create "/test" "To Delete")))
+      (gptel-agent-sessions)
+      (with-current-buffer "*GPTel Agent Sessions*"
+        (gptel-agent-sessions-refresh)
+        ;; In batch mode, header may not be present
+        (goto-char (point-min))
+        ;; Ensure we're on a valid entry
+        (should (tabulated-list-get-id))
+        (gptel-agent-sessions-mark-delete)
+        (gptel-agent-sessions-execute)
+        ;; Session should be deleted
+        (should-not (gptel-agent-session-load id)))
+      (kill-buffer "*GPTel Agent Sessions*"))))
+
+;;;; Session Browser Resume Tests
+
+(ert-deftest gptel-agent-sessions-test-sessions-resume ()
+  "Test resume from session browser."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (let ((id (gptel-agent-session-create "/test" "Resume Test")))
+      (gptel-agent-session-save id '((:role user :content "test")))
+      (gptel-agent-sessions)
+      (with-current-buffer "*GPTel Agent Sessions*"
+        (gptel-agent-sessions-refresh)
+        (goto-char (point-min))
+        (forward-line 1)
+        ;; Should not error
+        (gptel-agent-sessions-resume))
+      (kill-buffer "*GPTel Agent Sessions*"))))
+
+;;;; Session Browser Toggle Archive Tests
+
+(ert-deftest gptel-agent-sessions-test-toggle-archive ()
+  "Test archive toggle from session browser."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (let ((id (gptel-agent-session-create "/test" "Archive Test")))
+      (gptel-agent-sessions)
+      (with-current-buffer "*GPTel Agent Sessions*"
+        (gptel-agent-sessions-refresh)
+        ;; In batch mode, header may not be present, so go to point-min
+        ;; and find the first entry with a valid ID
+        (goto-char (point-min))
+        ;; Ensure we're on a valid entry
+        (should (tabulated-list-get-id))
+        (gptel-agent-sessions-toggle-archive)
+        (let ((session (gptel-agent-session-load id)))
+          (should (plist-get session :is-archived))))
+      (kill-buffer "*GPTel Agent Sessions*"))))
+
+;;;; Additional Customization Tests
+
+(ert-deftest gptel-agent-sessions-test-default-retention-size ()
+  "Test default retention size."
+  (should (numberp (default-value 'gptel-agent-session-retention-size-mb)))
+  (should (> (default-value 'gptel-agent-session-retention-size-mb) 0)))
+
+(ert-deftest gptel-agent-sessions-test-default-cleanup-on-startup ()
+  "Test default cleanup on startup setting."
+  (should (default-value 'gptel-agent-session-cleanup-on-startup)))
+
+(ert-deftest gptel-agent-sessions-test-default-json-dir ()
+  "Test default JSON directory."
+  (should (stringp (default-value 'gptel-agent-session-json-dir)))
+  (should (string-match-p "gptel-agent" (default-value 'gptel-agent-session-json-dir))))
+
+(ert-deftest gptel-agent-sessions-test-customization-group ()
+  "Test customization group defined."
+  (should (get 'gptel-agent-sessions 'group-documentation)))
+
+;;;; SQLite Message Storage Tests
+
+(ert-deftest gptel-agent-sessions-test-sqlite-message-order ()
+  "Test messages are stored and retrieved in order."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-database)
+    (setq gptel-agent--storage-backend 'sqlite)
+    (let* ((id (gptel-agent--sqlite-session-create "/test" "Order Test"))
+           (messages '((:role user :content "First")
+                       (:role assistant :content "Second")
+                       (:role user :content "Third"))))
+      (gptel-agent--sqlite-session-save id messages)
+      (let* ((loaded (gptel-agent--sqlite-session-load id))
+             (loaded-msgs (plist-get loaded :messages)))
+        (should (= (length loaded-msgs) 3))
+        (should (equal (plist-get (nth 0 loaded-msgs) :content) "First"))
+        (should (equal (plist-get (nth 1 loaded-msgs) :content) "Second"))
+        (should (equal (plist-get (nth 2 loaded-msgs) :content) "Third"))))))
+
+(ert-deftest gptel-agent-sessions-test-sqlite-message-replace ()
+  "Test saving replaces existing messages."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-database)
+    (setq gptel-agent--storage-backend 'sqlite)
+    (let ((id (gptel-agent--sqlite-session-create "/test" "Replace Test")))
+      ;; Save initial messages
+      (gptel-agent--sqlite-session-save id '((:role user :content "Old")))
+      ;; Save new messages
+      (gptel-agent--sqlite-session-save id '((:role user :content "New")))
+      (let* ((loaded (gptel-agent--sqlite-session-load id))
+             (msgs (plist-get loaded :messages)))
+        (should (= (length msgs) 1))
+        (should (equal (plist-get (car msgs) :content) "New"))))))
+
+(ert-deftest gptel-agent-sessions-test-sqlite-token-aggregation ()
+  "Test token count aggregation."
+  (skip-unless (gptel-agent--sqlite-available-p))
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-database)
+    (setq gptel-agent--storage-backend 'sqlite)
+    (let* ((id (gptel-agent--sqlite-session-create "/test" "Token Test"))
+           (messages '((:role user :content "Hi" :tokens 10)
+                       (:role assistant :content "Hello" :tokens 20)
+                       (:role user :content "Bye" :tokens 15))))
+      (gptel-agent--sqlite-session-save id messages)
+      (let ((loaded (gptel-agent--sqlite-session-load id)))
+        (should (= (plist-get loaded :token-count) 45))
+        (should (= (plist-get loaded :message-count) 3))))))
+
+;;;; Edge Cases
+
+(ert-deftest gptel-agent-sessions-test-load-nonexistent ()
+  "Test loading nonexistent session returns nil."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (should-not (gptel-agent-session-load "nonexistent-uuid"))))
+
+(ert-deftest gptel-agent-sessions-test-empty-message-list ()
+  "Test saving empty message list."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (let ((id (gptel-agent-session-create "/test" "Empty")))
+      (gptel-agent-session-save id '())
+      (let ((loaded (gptel-agent-session-load id)))
+        (should (= (plist-get loaded :message-count) 0))))))
+
+(ert-deftest gptel-agent-sessions-test-nil-name ()
+  "Test session creation with nil name."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (let ((id (gptel-agent-session-create "/test" nil)))
+      (should (stringp id))
+      (let ((loaded (gptel-agent-session-load id)))
+        (should loaded)
+        (should-not (plist-get loaded :name))))))
+
+(ert-deftest gptel-agent-sessions-test-special-chars-in-content ()
+  "Test message content with special characters."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (let* ((id (gptel-agent-session-create "/test" "Special"))
+           (content "Special chars: \"quotes\" 'apostrophe' \\ backslash < > & \n newline")
+           (messages `((:role user :content ,content))))
+      (gptel-agent-session-save id messages)
+      (let* ((loaded (gptel-agent-session-load id))
+             (msgs (plist-get loaded :messages)))
+        (should (equal (plist-get (car msgs) :content) content))))))
+
+(ert-deftest gptel-agent-sessions-test-unicode-content ()
+  "Test message content with unicode."
+  (gptel-agent-sessions-test--with-temp-env
+    (gptel-agent--init-storage)
+    (let* ((id (gptel-agent-session-create "/test" "Unicode"))
+           (content "Unicode: こんにちは 你好 مرحبا 🎉 emoji")
+           (messages `((:role user :content ,content))))
+      (gptel-agent-session-save id messages)
+      (let* ((loaded (gptel-agent-session-load id))
+             (msgs (plist-get loaded :messages)))
+        (should (equal (plist-get (car msgs) :content) content))))))
 
 (provide 'gptel-agent-sessions-test)
 ;;; gptel-agent-sessions-test.el ends here
